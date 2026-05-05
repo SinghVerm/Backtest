@@ -29,6 +29,67 @@ def prepare_df(df):
     return df
 
 
+def mark_trap(df):
+    df = df.copy()
+    df["Trap"] = False
+
+    df["date"] = pd.to_datetime(df["datetime"]).dt.date
+    df["dayHigh"] = df.groupby("date")["high"].cummax()
+
+    for i in range(2, len(df)):
+
+        c = df.loc[i]
+        prev = df.loc[i - 1]
+
+        # ===== SHOOTING =====
+        body_red = c["close"] < c["open"]
+
+        upper_wick = c["high"] - max(c["open"], c["close"])
+        lower_wick = min(c["open"], c["close"]) - c["low"]
+
+        upper_wick_more = upper_wick > lower_wick
+        broke_prev_high = c["high"] > prev["high"]
+        closed_below_prev_high = c["close"] < prev["high"]
+        is_day_high = c["high"] >= df.loc[i, "dayHigh"]
+
+        trap_wick = (
+            body_red
+            and upper_wick_more
+            and broke_prev_high
+            and closed_below_prev_high
+            and is_day_high
+        )
+
+        # ===== BOX =====
+        base = df.loc[i - 2]
+        c1 = df.loc[i - 1]
+
+        def range_pct(h, l, o):
+            return (h - l) / o * 100 if o != 0 else 0
+
+        def small_body(h, l, o, c_):
+            body = abs(c_ - o)
+            upper = h - max(c_, o)
+            lower = min(c_, o) - l
+            return body < (upper + lower)
+
+        base_range = range_pct(base["high"], base["low"], base["open"])
+
+        trap_box = (
+            base_range <= 0.25
+            and base["low"] <= c1["close"] <= base["high"]
+            and base["low"] <= c["close"] <= base["high"]
+            and small_body(base["high"], base["low"], base["open"], base["close"])
+            and small_body(c1["high"], c1["low"], c1["open"], c1["close"])
+            and small_body(c["high"], c["low"], c["open"], c["close"])
+        )
+
+        if trap_wick or trap_box:
+            df.loc[i, "Trap"] = True
+
+    return df
+
+
 # =========================
 # SIGNAL FILTER
 # =========================
@@ -359,64 +420,73 @@ def exit_trap(c, prev, state, direction):
     # LONG -> close below trap candle
     if direction == "long":
         if c["close"] < prev["low"]:
-            return True, c["close"], "Close Below Trap Candle"
+            return True, c["close"], "Shooting/Box Reversal"
 
     # SHORT -> close above trap candle
     else:
         if c["close"] > prev["high"]:
-            return True, c["close"], "Close Above Trap Candle"
+            return True, c["close"], "Shooting/Box Reversal"
 
     return False, None, None
 
 
 def exit_trap_2step(c, state, direction, i, entry_index):
-    # needs at least 2 candles after entry
+
     if entry_index is None:
         return False, None, None
 
-    # index of the "2nd candle" after entry
     second_idx = entry_index + 1
+
+    # must be at least 3rd candle
     if i <= second_idx:
         return False, None, None
 
-    first_high = state["first_high"]
-    first_low  = state["first_low"]
-
-    # initialize once
-    if "trap2_active" not in state:
+    # ===== INIT ONCE =====
+    if "trap2_checked" not in state:
+        state["trap2_checked"] = False
         state["trap2_active"] = False
-        state["trap2_ref_high"] = None
-        state["trap2_ref_low"] = None
 
-    # ---- Step 1: evaluate ONLY the 2nd candle
-    if not state["trap2_active"]:
-        # grab the actual 2nd candle from state (store it at entry time) or pass it in
-        second = state["second_candle"]  # set this when you open trade
+    # ===== STEP 1: CHECK ONLY ONCE =====
+    if not state["trap2_checked"]:
+
+        second = state.get("second_candle")
+
         if second is None:
+            state["trap2_checked"] = True
             return False, None, None
+
+        first_high = state["first_high"]
+        first_low = state["first_low"]
 
         if direction == "long":
             if second["high"] > first_high and second["close"] < first_high:
                 state["trap2_active"] = True
-                state["trap2_ref_high"] = second["high"]
                 state["trap2_ref_low"] = second["low"]
+                state["trap2_start_idx"] = second_idx + 1   # this is candle 3
 
-        else:  # short
+        else:
             if second["low"] < first_low and second["close"] > first_low:
                 state["trap2_active"] = True
                 state["trap2_ref_high"] = second["high"]
-                state["trap2_ref_low"] = second["low"]
+                state["trap2_start_idx"] = second_idx + 1
 
+        state["trap2_checked"] = True
         return False, None, None
 
-    # ---- Step 2: confirmation on any later candle
+    # ===== STEP 2: CONFIRMATION =====
     if state["trap2_active"]:
+
+        # allow only candle 3 and 4
+        if i > state["trap2_start_idx"] + 1:
+            return False, None, None
+
         if direction == "long":
             if c["close"] < state["trap2_ref_low"]:
-                return True, c["close"], "Close Below 2nd Candle Low (Trap2)"
+                return True, c["close"], "2nd Candle Fake Break"
+
         else:
             if c["close"] > state["trap2_ref_high"]:
-                return True, c["close"], "Close Above 2nd Candle High (Trap2)"
+                return True, c["close"], "2nd Candle Fake Break"
 
     return False, None, None
 
@@ -454,6 +524,7 @@ def exit_mfe(c, state, params):
 def run_backtest(df, config):
 
     df = prepare_df(df)
+    df = mark_trap(df)
     pivot_levels_per_day = df.groupby("date")[["yHigh", "yLow", "yMid", "yClose"]].nunique()
     if (pivot_levels_per_day > 1).any().any():
         raise ValueError("Inconsistent yHigh/yLow/yMid/yClose values found within one or more dates")
@@ -519,9 +590,9 @@ def run_backtest(df, config):
             "partial_done": False,
             "partial_profit": 0
         }
-        # store second candle once (if exists)
+        # store second candle once (if exists) — required for trap2
         if entry_index + 1 < len(day):
-            state["second_candle"] = day.loc[entry_index + 1]
+            state["second_candle"] = day.iloc[entry_index + 1]
         else:
             state["second_candle"] = None
 
@@ -555,24 +626,32 @@ def run_backtest(df, config):
                 if row0["close"] < lvl:
                     state["tested_levels"][name] = "accepted"
 
-        exit_price = None
         exit_reason = "EOD"
+        exit_price = None
 
         # ===== loop
         for i in range(entry_index + 1, len(day)):
 
             c = day.loc[i]
-            prev = day.loc[i-1]
+            prev = day.loc[i - 1]
+
+            exit_price = None
+
             if i == 1:
                 print("First MFE check candle:", c["datetime"])
 
-            # ===== ALWAYS RUN MFE ENGINE FIRST (updates state)
-            mfe_hit, mfe_price, mfe_reason = exit_mfe(c, state, config["params"])
+            # 1. RULES FIRST (evaluate all; collect hits in priority order)
+            hits = []
 
-            # ===== THEN CHECK OVERRIDE EXITS
             for rule in config["exit_rules"]:
 
-                if rule == "hard_yhigh":
+                if rule == "trap":
+                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
+
+                elif rule == "trap2":
+                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
+
+                elif rule == "hard_yhigh":
                     r_hit, r_price, r_reason = exit_hard_yhigh(c, state, config["direction"])
 
                 elif rule == "hard_ylow":
@@ -612,24 +691,21 @@ def run_backtest(df, config):
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
 
-                elif rule == "trap":
-                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
-
-                elif rule == "trap2":
-                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
-
                 else:
                     continue
 
                 if r_hit:
-                    exit_price = r_price
-                    exit_reason = r_reason
-                    break
+                    hits.append((r_price, r_reason))
 
-            # ===== IF MFE TRIGGERED EXIT
-            if mfe_hit:
-                exit_price = mfe_price
-                exit_reason = mfe_reason
+            if hits:
+                exit_price, exit_reason = hits[0]
+
+            # 2. MFE ONLY IF NO RULE HIT
+            if exit_price is None:
+                mfe_hit, mfe_price, mfe_reason = exit_mfe(c, state, config["params"])
+                if mfe_hit:
+                    exit_price = mfe_price
+                    exit_reason = mfe_reason
 
             if exit_price is not None:
                 break
