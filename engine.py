@@ -393,14 +393,23 @@ def exit_fib38_reclaim(c, state, direction):
     return False, None, None
 
 
-def exit_doji(c, prev, state):
-    body = abs(prev["close"] - prev["open"])
-    upper = prev["high"] - max(prev["close"], prev["open"])
-    lower = min(prev["close"], prev["open"]) - prev["low"]
+def exit_trap(c, prev, state, direction):
 
-    if body < (upper + lower):
+    # indicator-based flag (must exist in df)
+    is_trap = prev.get("Trap", False)
+
+    if not is_trap:
+        return False, None, None
+
+    # LONG -> close below trap candle
+    if direction == "long":
         if c["close"] < prev["low"]:
-            return True, c["close"], "Doji Breakdown"
+            return True, c["close"], "Close Below Trap Candle"
+
+    # SHORT -> close above trap candle
+    else:
+        if c["close"] > prev["high"]:
+            return True, c["close"], "Close Above Trap Candle"
 
     return False, None, None
 
@@ -596,8 +605,8 @@ def run_backtest(df, config):
                 elif rule == "fib38_reclaim":
                     r_hit, r_price, r_reason = exit_fib38_reclaim(c, state, config["direction"])
 
-                elif rule == "doji":
-                    r_hit, r_price, r_reason = exit_doji(c, prev, state)
+                elif rule == "trap":
+                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
 
                 else:
                     continue

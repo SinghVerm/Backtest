@@ -17,7 +17,88 @@ EXIT_RULE_MAP = {
     "Close Above Fib38 Then Close Below Fib38": "fib38_reclaim",
     "Close Below Fib50": "fib50",
     "Close Above EMA": "ema",
+    "Shooting or Box": "trap",
 }
+
+
+def mark_trap(df):
+
+    df = df.copy()
+
+    # previous values
+    df["open_prev"] = df["open"].shift(1)
+    df["high_prev"] = df["high"].shift(1)
+    df["close_prev"] = df["close"].shift(1)
+
+    # body + wick
+    bodyRed = df["close"] < df["open"]
+
+    upper_wick = df["high"] - df[["open", "close"]].max(axis=1)
+    lower_wick = df[["open", "close"]].min(axis=1) - df["low"]
+
+    upperWickMore = upper_wick > lower_wick
+
+    brokePrevHigh = df["high"] > df["high_prev"]
+    closedBelowPrevHigh = df["close"] < df["high_prev"]
+
+    # daily high logic
+    if "datetime" not in df.columns:
+        if "time" in df.columns:
+            df["datetime"] = pd.to_datetime(df["time"])
+        else:
+            df["datetime"] = pd.to_datetime(df["datetime"])
+    df["date"] = df["datetime"].dt.date
+    df["dayHigh"] = df.groupby("date")["high"].cummax()
+    isDayHigh = df["high"] >= df["dayHigh"]
+
+    # trap wick (shooting)
+    trapWick = (
+        bodyRed &
+        upperWickMore &
+        brokePrevHigh &
+        closedBelowPrevHigh &
+        isDayHigh
+    )
+
+    # ===== Trap Zone (box) =====
+    def is_small_body(row):
+        body = abs(row["close"] - row["open"])
+        upper = row["high"] - max(row["close"], row["open"])
+        lower = min(row["close"], row["open"]) - row["low"]
+        return body < (upper + lower)
+
+    df["rangePct"] = (df["high"] - df["low"]) / df["open"] * 100
+
+    base_small = df["rangePct"].shift(2) <= 0.25
+
+    c1_inside = (
+        (df["close"].shift(1) >= df["low"].shift(2)) &
+        (df["close"].shift(1) <= df["high"].shift(2))
+    )
+
+    c2_inside = (
+        (df["close"] >= df["low"].shift(2)) &
+        (df["close"] <= df["high"].shift(2))
+    )
+
+    base_small_body = df.shift(2).apply(is_small_body, axis=1)
+    c1_small_body = df.shift(1).apply(is_small_body, axis=1)
+    c2_small_body = df.apply(is_small_body, axis=1)
+
+    trapZone = (
+        base_small &
+        c1_inside &
+        c2_inside &
+        base_small_body &
+        c1_small_body &
+        c2_small_body
+    )
+
+    # FINAL
+    df["Trap"] = trapWick | trapZone
+
+    return df
+
 
 st.set_page_config(layout="wide")
 st.title("Trading System Lab (Modular Engine)")
@@ -99,6 +180,7 @@ if run:
     else:
         config["invalid_candles"] = selected_candles
 
+    df = mark_trap(df)
     res = run_backtest(df, config)
     if res.empty:
         st.warning("No trades found")
