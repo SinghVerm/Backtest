@@ -25,7 +25,7 @@ st.title("Trading System Lab (Modular Engine)")
 # =========================
 # FILE
 # =========================
-DATA_PATH = "data/NSE_NIFTY_Updated.xlsx"
+DATA_PATH = "NSE_NIFTY_Updated.xlsx"
 
 if os.path.exists(DATA_PATH):
     df = pd.read_excel(DATA_PATH)
