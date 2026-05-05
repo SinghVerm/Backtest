@@ -21,6 +21,7 @@ EXIT_RULE_MAP = {
     "Close Below Fib78": "fib_0.78",
     "Close Above EMA": "ema",
     "Shooting or Box": "trap",
+    "2nd Candle Trap Confirm": "trap2",
 }
 
 

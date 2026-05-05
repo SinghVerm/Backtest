@@ -369,6 +369,58 @@ def exit_trap(c, prev, state, direction):
     return False, None, None
 
 
+def exit_trap_2step(c, state, direction, i, entry_index):
+    # needs at least 2 candles after entry
+    if entry_index is None:
+        return False, None, None
+
+    # index of the "2nd candle" after entry
+    second_idx = entry_index + 1
+    if i <= second_idx:
+        return False, None, None
+
+    first_high = state["first_high"]
+    first_low  = state["first_low"]
+
+    # initialize once
+    if "trap2_active" not in state:
+        state["trap2_active"] = False
+        state["trap2_ref_high"] = None
+        state["trap2_ref_low"] = None
+
+    # ---- Step 1: evaluate ONLY the 2nd candle
+    if not state["trap2_active"]:
+        # grab the actual 2nd candle from state (store it at entry time) or pass it in
+        second = state["second_candle"]  # set this when you open trade
+        if second is None:
+            return False, None, None
+
+        if direction == "long":
+            if second["high"] > first_high and second["close"] < first_high:
+                state["trap2_active"] = True
+                state["trap2_ref_high"] = second["high"]
+                state["trap2_ref_low"] = second["low"]
+
+        else:  # short
+            if second["low"] < first_low and second["close"] > first_low:
+                state["trap2_active"] = True
+                state["trap2_ref_high"] = second["high"]
+                state["trap2_ref_low"] = second["low"]
+
+        return False, None, None
+
+    # ---- Step 2: confirmation on any later candle
+    if state["trap2_active"]:
+        if direction == "long":
+            if c["close"] < state["trap2_ref_low"]:
+                return True, c["close"], "Close Below 2nd Candle Low (Trap2)"
+        else:
+            if c["close"] > state["trap2_ref_high"]:
+                return True, c["close"], "Close Above 2nd Candle High (Trap2)"
+
+    return False, None, None
+
+
 def exit_mfe(c, state, params):
 
     entry = state["entry"]
@@ -467,6 +519,11 @@ def run_backtest(df, config):
             "partial_done": False,
             "partial_profit": 0
         }
+        # store second candle once (if exists)
+        if entry_index + 1 < len(day):
+            state["second_candle"] = day.loc[entry_index + 1]
+        else:
+            state["second_candle"] = None
 
         # =========================
         # PRE-FILTER LEVELS (FIRST CANDLE)
@@ -557,6 +614,9 @@ def run_backtest(df, config):
 
                 elif rule == "trap":
                     r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
+
+                elif rule == "trap2":
+                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
 
                 else:
                     continue
