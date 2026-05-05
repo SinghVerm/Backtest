@@ -290,40 +290,26 @@ def exit_strength(c, prev, state, direction):
     return False, None, None
 
 
-def exit_fib127(c, state, direction):
-
-    high = state["first_high"]
-    low = state["first_low"]
-
-    # TradingView style: draw HIGH → LOW
-    fib127 = high + 0.272 * (high - low)
-
-    if direction == "short":
-        if c["close"] > fib127:
-            return True, c["close"], "Close Above Fib127"
-
-    else:
-        if c["close"] < fib127:
-            return True, c["close"], "Close Above Fib127"
-
-    return False, None, None
-
-
-def exit_fib50(c, state, direction):
+def get_fib_level(state, level):
 
     high = state["first_high"]
     low  = state["first_low"]
 
-    fib50 = (high + low) / 2
+    # standard retracement
+    return high - (level * (high - low))
 
-    # ===== CLOSE-BASED LOGIC (THIS IS WHAT YOU WANT)
+
+def exit_fib(c, state, direction, level):
+
+    fib = get_fib_level(state, level)
+
     if direction == "long":
-        if c["close"] < fib50:
-            return True, c["close"], "Close Below Fib50"
+        if c["close"] < fib:
+            return True, c["close"], f"Close Below Fib{int(level*100)}"
 
-    else:  # short
-        if c["close"] > fib50:
-            return True, c["close"], "Close Above Fib50"
+    else:
+        if c["close"] > fib:
+            return True, c["close"], f"Close Above Fib{int(level*100)}"
 
     return False, None, None
 
@@ -358,37 +344,6 @@ def exit_ema_weakness(c, state):
     if state["above_ema_seen"]:
         if c["close"] < ema:
             return True, c["close"], "Above EMA Then Close Below EMA"
-
-    return False, None, None
-
-
-def exit_fib38_reclaim(c, state, direction):
-
-    high = state["first_high"]
-    low  = state["first_low"]
-
-    # draw HIGH -> LOW
-    fib38 = high - 0.382 * (high - low)
-
-    if "fib38_reclaim_seen" not in state:
-        state["fib38_reclaim_seen"] = False
-
-    if direction == "long":
-        # STEP 1: must first reclaim above fib38
-        if c["close"] > fib38:
-            state["fib38_reclaim_seen"] = True
-
-        # STEP 2: then lose it
-        if state["fib38_reclaim_seen"] and c["close"] < fib38:
-            return True, c["close"], "Close Above Fib38 Then Close Below Fib38"
-    else:
-        # STEP 1: must first reclaim below fib38
-        if c["close"] < fib38:
-            state["fib38_reclaim_seen"] = True
-
-        # STEP 2: then lose it (close back above)
-        if state["fib38_reclaim_seen"] and c["close"] > fib38:
-            return True, c["close"], "Close Below Fib38 Then Close Above Fib38"
 
     return False, None, None
 
@@ -590,20 +545,15 @@ def run_backtest(df, config):
                 elif rule == "strength":
                     r_hit, r_price, r_reason = exit_strength(c, prev, state, config["direction"])
 
-                elif rule == "fib127":
-                    r_hit, r_price, r_reason = exit_fib127(c, state, config["direction"])
-
-                elif rule == "fib50":
-                    r_hit, r_price, r_reason = exit_fib50(c, state, config["direction"])
+                elif rule.startswith("fib_"):
+                    level = float(rule.split("_")[1])
+                    r_hit, r_price, r_reason = exit_fib(c, state, config["direction"], level)
 
                 elif rule == "ema":
                     r_hit, r_price, r_reason = exit_ema(c, state, config["direction"])
 
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
-
-                elif rule == "fib38_reclaim":
-                    r_hit, r_price, r_reason = exit_fib38_reclaim(c, state, config["direction"])
 
                 elif rule == "trap":
                     r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])

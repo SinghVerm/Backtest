@@ -14,8 +14,11 @@ EXIT_RULE_MAP = {
     "Close Above First High": "hard_first_high",
     "Weakness at Yesterday Levels": "weakness",
     "Strength at Yesterday Levels": "strength",
-    "Close Above Fib38 Then Close Below Fib38": "fib38_reclaim",
-    "Close Below Fib50": "fib50",
+    "Close Below Fib23": "fib_0.23",
+    "Close Below Fib38": "fib_0.38",
+    "Close Below Fib50": "fib_0.50",
+    "Close Below Fib61": "fib_0.61",
+    "Close Below Fib78": "fib_0.78",
     "Close Above EMA": "ema",
     "Shooting or Box": "trap",
 }
@@ -103,6 +106,9 @@ def mark_trap(df):
 st.set_page_config(layout="wide")
 st.title("Trading System Lab (Modular Engine)")
 
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 # =========================
 # FILE
 # =========================
@@ -168,10 +174,13 @@ if run:
     }
 
     config["direction"] = direction.lower()
+    PARTIAL_PCT = partial / 100
+    LOCK_PCT = lock / 100
+    TRAIL_PCT = trail / 100
     config["params"] = {
-        "partial": partial,
-        "lock": lock,
-        "trail": trail,
+        "partial": PARTIAL_PCT * 100,
+        "lock": LOCK_PCT * 100,
+        "trail": TRAIL_PCT * 100,
         "direction": config["direction"]
     }
 
@@ -218,6 +227,28 @@ if run:
             "R:R": round(rr,2)
         })
 
+        summary = {
+            "signal": signal,
+            "direction": direction,
+            "exit_rules": ", ".join(selected_labels),
+            "partial%": f"{PARTIAL_PCT*100:.2f}",
+            "lock%": f"{LOCK_PCT*100:.2f}",
+            "trail%": f"{TRAIL_PCT*100:.2f}",
+            "trades": len(res),
+            "total_pnl": round(res["pnl"].sum(), 2),
+            "avg_pnl": round(res["pnl"].mean(), 2),
+            "winrate": round(len(wins)/len(res)*100, 2),
+            "rr": round(rr, 2)
+        }
+
+        if st.session_state.history:
+            last = st.session_state.history[-1]
+            if last["signal"] != signal or last["direction"] != direction:
+                st.session_state.history = []
+
+        st.session_state.history.append(summary)
+        st.session_state.history = st.session_state.history[-10:]
+
     st.subheader("Candle Breakdown")
 
     if len(res):
@@ -233,6 +264,30 @@ if run:
 
     st.subheader("Worst Trades")
     st.dataframe(res.sort_values("pnl").head(10))
+
+    st.subheader("Recent Tests (Comparison)")
+
+    if st.session_state.history:
+        hist_df = pd.DataFrame(st.session_state.history)
+        cols = [
+            "signal",
+            "direction",
+            "exit_rules",
+            "partial%",
+            "lock%",
+            "trail%",
+            "trades",
+            "total_pnl",
+            "avg_pnl",
+            "winrate",
+            "rr"
+        ]
+        hist_df = hist_df[cols]
+
+        st.dataframe(
+            hist_df,
+            use_container_width=True
+        )
 
     st.download_button(
         "Download CSV",
