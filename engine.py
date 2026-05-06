@@ -1,4 +1,7 @@
 import pandas as pd
+import numpy as np
+
+np.seterr(all="ignore")
 
 # =========================
 # PREP
@@ -29,65 +32,56 @@ def prepare_df(df):
     return df
 
 
-def mark_trap(df):
-    df = df.copy()
-    df["Trap"] = False
+def _compute_day_spans(records):
+    spans = {}
+    if not records:
+        return spans
+    i0 = 0
+    cur = records[0]["date"]
+    for i in range(1, len(records) + 1):
+        if i == len(records) or records[i]["date"] != cur:
+            spans[cur] = (i0, i)
+            if i < len(records):
+                i0 = i
+                cur = records[i]["date"]
+    return spans
 
-    df["date"] = pd.to_datetime(df["datetime"]).dt.date
-    df["dayHigh"] = df.groupby("date")["high"].cummax()
 
-    for i in range(2, len(df)):
+def prepare_df_fast(df_raw):
+    """Load once: parsed DataFrame → row dicts + per-day index ranges (no pandas in hot loop)."""
+    df = prepare_df(df_raw)
+    pivot_levels_per_day = df.groupby("date")[["yHigh", "yLow", "yMid", "yClose"]].nunique()
+    if (pivot_levels_per_day > 1).any().any():
+        raise ValueError("Inconsistent yHigh/yLow/yMid/yClose values found within one or more dates")
+    records = df.to_dict("records")
+    spans = _compute_day_spans(records)
+    return {"records": records, "spans": spans}
 
-        c = df.loc[i]
-        prev = df.loc[i - 1]
 
-        # ===== SHOOTING =====
-        body_red = c["close"] < c["open"]
+def get_days_from_records(records, signal):
+    days = []
+    seen = set()
+    for r in records:
+        d = r["date"]
+        if d in seen:
+            continue
+        seen.add(d)
+        if r["Signal"] == signal:
+            days.append(d)
+    return days
 
-        upper_wick = c["high"] - max(c["open"], c["close"])
-        lower_wick = min(c["open"], c["close"]) - c["low"]
 
-        upper_wick_more = upper_wick > lower_wick
-        broke_prev_high = c["high"] > prev["high"]
-        closed_below_prev_high = c["close"] < prev["high"]
-        is_day_high = c["high"] >= df.loc[i, "dayHigh"]
-
-        trap_wick = (
-            body_red
-            and upper_wick_more
-            and broke_prev_high
-            and closed_below_prev_high
-            and is_day_high
-        )
-
-        # ===== BOX =====
-        base = df.loc[i - 2]
-        c1 = df.loc[i - 1]
-
-        def range_pct(h, l, o):
-            return (h - l) / o * 100 if o != 0 else 0
-
-        def small_body(h, l, o, c_):
-            body = abs(c_ - o)
-            upper = h - max(c_, o)
-            lower = min(c_, o) - l
-            return body < (upper + lower)
-
-        base_range = range_pct(base["high"], base["low"], base["open"])
-
-        trap_box = (
-            base_range <= 0.25
-            and base["low"] <= c1["close"] <= base["high"]
-            and base["low"] <= c["close"] <= base["high"]
-            and small_body(base["high"], base["low"], base["open"], base["close"])
-            and small_body(c1["high"], c1["low"], c1["open"], c1["close"])
-            and small_body(c["high"], c["low"], c["open"], c["close"])
-        )
-
-        if trap_wick or trap_box:
-            df.loc[i, "Trap"] = True
-
-    return df
+def _floating_open_pnl(c, state, entry, config):
+    params = config["params"]
+    direction = config["direction"]
+    if not state.get("partial_done"):
+        if direction == "long":
+            return 2 * (c["close"] - entry)
+        return 2 * (entry - c["close"])
+    part = _entry_scaled(entry, params["partial"])
+    if direction == "long":
+        return part + (c["close"] - entry)
+    return part + (entry - c["close"])
 
 
 # =========================
@@ -351,24 +345,32 @@ def exit_strength(c, prev, state, direction):
     return False, None, None
 
 
-def get_fib_level(state, level):
+def exit_fib(c, state, direction, level):
 
     high = state["first_high"]
     low  = state["first_low"]
 
-    # standard retracement
-    return high - (level * (high - low))
+    fib = high - (level * (high - low))
 
-
-def exit_fib(c, state, direction, level):
-
-    fib = get_fib_level(state, level)
-
+    # ===== LONG =====
     if direction == "long":
+
+        # price goes DOWN into fib
+        if c["low"] <= fib:
+            return True, fib, f"Touch Fib{int(level*100)}"
+
+        # fallback confirmation
         if c["close"] < fib:
             return True, c["close"], f"Close Below Fib{int(level*100)}"
 
+    # ===== SHORT =====
     else:
+
+        # price goes UP into fib
+        if c["high"] >= fib:
+            return True, fib, f"Touch Fib{int(level*100)}"
+
+        # fallback confirmation
         if c["close"] > fib:
             return True, c["close"], f"Close Above Fib{int(level*100)}"
 
@@ -420,12 +422,12 @@ def exit_trap(c, prev, state, direction):
     # LONG -> close below trap candle
     if direction == "long":
         if c["close"] < prev["low"]:
-            return True, c["close"], "Shooting/Box Reversal"
+            return True, c["close"], "Close Below Trap Candle"
 
     # SHORT -> close above trap candle
     else:
         if c["close"] > prev["high"]:
-            return True, c["close"], "Shooting/Box Reversal"
+            return True, c["close"], "Close Above Trap Candle"
 
     return False, None, None
 
@@ -441,16 +443,15 @@ def exit_trap_2step(c, state, direction, i, entry_index):
     if i <= second_idx:
         return False, None, None
 
-    # ===== INIT ONCE =====
+    # init once
     if "trap2_checked" not in state:
         state["trap2_checked"] = False
         state["trap2_active"] = False
 
-    # ===== STEP 1: CHECK ONLY ONCE =====
+    # STEP 1 — check only once
     if not state["trap2_checked"]:
 
         second = state.get("second_candle")
-
         if second is None:
             state["trap2_checked"] = True
             return False, None, None
@@ -462,7 +463,7 @@ def exit_trap_2step(c, state, direction, i, entry_index):
             if second["high"] > first_high and second["close"] < first_high:
                 state["trap2_active"] = True
                 state["trap2_ref_low"] = second["low"]
-                state["trap2_start_idx"] = second_idx + 1   # this is candle 3
+                state["trap2_start_idx"] = second_idx + 1
 
         else:
             if second["low"] < first_low and second["close"] > first_low:
@@ -473,17 +474,16 @@ def exit_trap_2step(c, state, direction, i, entry_index):
         state["trap2_checked"] = True
         return False, None, None
 
-    # ===== STEP 2: CONFIRMATION =====
+    # STEP 2 — confirmation (LIMITED WINDOW)
     if state["trap2_active"]:
 
-        # allow only candle 3 and 4
+        # only candle 3 & 4
         if i > state["trap2_start_idx"] + 1:
             return False, None, None
 
         if direction == "long":
             if c["close"] < state["trap2_ref_low"]:
                 return True, c["close"], "2nd Candle Fake Break"
-
         else:
             if c["close"] > state["trap2_ref_high"]:
                 return True, c["close"], "2nd Candle Fake Break"
@@ -491,10 +491,15 @@ def exit_trap_2step(c, state, direction, i, entry_index):
     return False, None, None
 
 
+def _entry_scaled(entry, v):
+    """Percentage of entry (params are percent units, e.g. 18 → 18%)."""
+    if v is None:
+        return 0.0
+    return entry * (v / 100)
+
+
 def exit_mfe(c, state, params):
-
     entry = state["entry"]
-
     if params["direction"] == "long":
         pnl_now = c["close"] - entry
         mfe_now = c["high"] - entry
@@ -504,16 +509,17 @@ def exit_mfe(c, state, params):
 
     state["max_mfe"] = max(state["max_mfe"], mfe_now)
 
-    # partial
-    if not state["partial_done"] and state["max_mfe"] >= entry * (params["partial"] / 100):
+    partial_thr = _entry_scaled(entry, params["partial"])
+    if not state["partial_done"] and state["max_mfe"] >= partial_thr:
         state["partial_done"] = True
-        state["partial_profit"] = (entry * (params["partial"] / 100)) / 2
+        state["partial_profit"] = partial_thr / 2
 
-    # trail
-    if state["max_mfe"] >= entry * (params["lock"] / 100):
+    lock_thr = _entry_scaled(entry, params["lock"])
+    trail_thr = _entry_scaled(entry, params["trail"])
+    if state["max_mfe"] >= lock_thr:
         giveback = state["max_mfe"] - pnl_now
-        if giveback >= entry * (params["trail"] / 100):
-            return True, c["close"], "Trail"
+        if giveback >= trail_thr:
+            return True, c["close"], "Trail Exit"
 
     return False, None, None
 
@@ -521,25 +527,35 @@ def exit_mfe(c, state, params):
 # =========================
 # MAIN ENGINE
 # =========================
-def run_backtest(df, config):
+def run_backtest(df_fast, config):
+    """
+    df_fast: output of prepare_df_fast (dict with records + spans), or a DataFrame (converted once).
+    """
+    if isinstance(df_fast, pd.DataFrame):
+        df_fast = prepare_df_fast(df_fast)
 
-    df = prepare_df(df)
-    df = mark_trap(df)
-    pivot_levels_per_day = df.groupby("date")[["yHigh", "yLow", "yMid", "yClose"]].nunique()
-    if (pivot_levels_per_day > 1).any().any():
-        raise ValueError("Inconsistent yHigh/yLow/yMid/yClose values found within one or more dates")
+    records = df_fast["records"]
+    spans = df_fast["spans"]
 
-    days = get_days(df, config["signal"])
+    all_days = get_days_from_records(records, config["signal"])
+
+    if "test_days" in config:
+        days = [d for d in all_days if d in config["test_days"]]
+    else:
+        days = all_days
 
     trades = []
 
     for d in days:
+        if d not in spans:
+            continue
 
-        day = df[df["date"] == d].reset_index(drop=True)
+        lo, hi = spans[d]
+        day = records[lo:hi]
         if len(day) < 3:
             continue
 
-        row0 = day.loc[0]
+        row0 = day[0]
 
         # ===== candle filter
         if "valid_candles" in config:
@@ -554,14 +570,12 @@ def run_backtest(df, config):
         signal = config["signal"]
         direction = config["direction"]
 
-        # default
         entry_index = 0
 
-        # signal-specific override
         if signal == "Gap Low" and direction == "short":
             if len(day) < 2:
                 continue
-            row1 = day.loc[1]
+            row1 = day[1]
             if row1["low"] <= row0["low"]:
                 entry_index = 1
             else:
@@ -574,8 +588,7 @@ def run_backtest(df, config):
             if row0["close"] <= row0["yHigh"]:
                 continue
 
-        entry = day.loc[entry_index, "close"]
-        print(d, signal, entry_index)
+        entry = day[entry_index]["close"]
 
         # ===== state
         state = {
@@ -590,9 +603,8 @@ def run_backtest(df, config):
             "partial_done": False,
             "partial_profit": 0
         }
-        # store second candle once (if exists) — required for trap2
         if entry_index + 1 < len(day):
-            state["second_candle"] = day.iloc[entry_index + 1]
+            state["second_candle"] = dict(day[entry_index + 1])
         else:
             state["second_candle"] = None
 
@@ -609,7 +621,7 @@ def run_backtest(df, config):
             "yClose": state["yClose"]
         }
 
-        row0 = day.loc[0]
+        row0 = day[0]
 
         for name, lvl in levels.items():
 
@@ -617,41 +629,26 @@ def run_backtest(df, config):
                 continue
 
             if config["direction"] == "long":
-                # if first candle already closed ABOVE level → accepted
                 if row0["close"] > lvl:
                     state["tested_levels"][name] = "accepted"
 
-            else:  # SHORT
-                # if first candle already closed BELOW level → accepted
+            else:
                 if row0["close"] < lvl:
                     state["tested_levels"][name] = "accepted"
 
-        exit_reason = "EOD"
         exit_price = None
+        exit_reason = "EOD"
 
-        # ===== loop
         for i in range(entry_index + 1, len(day)):
 
-            c = day.loc[i]
-            prev = day.loc[i - 1]
+            c = day[i]
+            prev = day[i - 1]
 
-            exit_price = None
-
-            if i == 1:
-                print("First MFE check candle:", c["datetime"])
-
-            # 1. RULES FIRST (evaluate all; collect hits in priority order)
             hits = []
 
             for rule in config["exit_rules"]:
 
-                if rule == "trap":
-                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
-
-                elif rule == "trap2":
-                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
-
-                elif rule == "hard_yhigh":
+                if rule == "hard_yhigh":
                     r_hit, r_price, r_reason = exit_hard_yhigh(c, state, config["direction"])
 
                 elif rule == "hard_ylow":
@@ -691,6 +688,12 @@ def run_backtest(df, config):
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
 
+                elif rule == "trap":
+                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
+
+                elif rule == "trap2":
+                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
+
                 else:
                     continue
 
@@ -700,26 +703,29 @@ def run_backtest(df, config):
             if hits:
                 exit_price, exit_reason = hits[0]
 
-            # 2. MFE ONLY IF NO RULE HIT
             if exit_price is None:
                 mfe_hit, mfe_price, mfe_reason = exit_mfe(c, state, config["params"])
                 if mfe_hit:
                     exit_price = mfe_price
                     exit_reason = mfe_reason
 
+            kill_at = config.get("intraday_kill_loss", -500)
+            if exit_price is None and kill_at is not None:
+                if _floating_open_pnl(c, state, entry, config) < kill_at:
+                    exit_price = c["close"]
+                    exit_reason = "Intraday Kill"
+                    break
+
             if exit_price is not None:
                 break
 
         if exit_price is None:
-            exit_price = day.iloc[-1]["close"]
+            exit_price = day[-1]["close"]
 
         params = config["params"]
-        # qty = 2 model
         if state["partial_done"]:
-            # 1 qty closed at partial level
-            partial_points = entry * (params["partial"] / 100)
+            partial_points = _entry_scaled(entry, params["partial"])
 
-            # 1 qty runs till exit
             if config["direction"] == "long":
                 remaining_points = (exit_price - entry)
             else:
@@ -728,26 +734,18 @@ def run_backtest(df, config):
             pnl = partial_points + remaining_points
 
         else:
-            # both qty held till exit
             if config["direction"] == "long":
                 pnl = 2 * (exit_price - entry)
             else:
                 pnl = 2 * (entry - exit_price)
 
-        print(
-            d,
-            "entry_index:", entry_index,
-            "entry_price:", entry,
-            "entry_time:", day.loc[entry_index, "datetime"]
-        )
-
         trades.append({
             "date": d,
             "candle": row0["Candles"],
-            "entry": round(entry,2),
-            "exit": round(exit_price,2),
-            "pnl": round(pnl,2),
-            "reason": exit_reason
+            "entry": round(entry, 2),
+            "exit": round(exit_price, 2),
+            "pnl": round(pnl, 2),
+            "exit_reason": exit_reason
         })
 
     return pd.DataFrame(trades)
