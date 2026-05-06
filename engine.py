@@ -6,6 +6,64 @@ np.seterr(all="ignore")
 # =========================
 # PREP
 # =========================
+
+
+def mark_trap(df):
+    df = df.copy()
+    df["Shooting"] = False
+    df["Box"] = False
+
+    df["date"] = pd.to_datetime(df["datetime"]).dt.date
+    df["dayHigh"] = df.groupby("date")["high"].cummax()
+
+    for i in range(2, len(df)):
+
+        c = df.loc[i]
+        prev = df.loc[i - 1]
+
+        # ===== SHOOTING =====
+        body_red = c["close"] < c["open"]
+
+        upper_wick = c["high"] - max(c["open"], c["close"])
+        lower_wick = min(c["open"], c["close"]) - c["low"]
+
+        trap_wick = (
+            body_red
+            and upper_wick > lower_wick
+            and c["high"] > prev["high"]
+            and c["close"] < prev["high"]
+            and c["high"] >= df.loc[i, "dayHigh"]
+        )
+
+        # ===== BOX =====
+        base = df.loc[i - 2]
+        c1 = df.loc[i - 1]
+
+        def small_body(row):
+            body = abs(row["close"] - row["open"])
+            upper = row["high"] - max(row["close"], row["open"])
+            lower = min(row["close"], row["open"]) - row["low"]
+            return body < (upper + lower)
+
+        base_range = (base["high"] - base["low"]) / base["open"] * 100
+
+        trap_box = (
+            base_range <= 0.25
+            and base["low"] <= c1["close"] <= base["high"]
+            and base["low"] <= c["close"] <= base["high"]
+            and small_body(base)
+            and small_body(c1)
+            and small_body(c)
+        )
+
+        if trap_wick:
+            df.loc[i, "Shooting"] = True
+        if trap_box:
+            df.loc[i, "Box"] = True
+
+    return df
+
+
 def prepare_df(df):
 
     df.columns = df.columns.str.strip()
@@ -28,6 +86,8 @@ def prepare_df(df):
         "Yesterday Close": "yClose",
         "EMA 100": "ema100"
     }, inplace=True)
+
+    df = mark_trap(df)
 
     return df
 
@@ -345,32 +405,32 @@ def exit_strength(c, prev, state, direction):
     return False, None, None
 
 
-def exit_fib(c, state, direction, level):
-
+def _fib_price(state, level):
     high = state["first_high"]
-    low  = state["first_low"]
+    low = state["first_low"]
+    return high - (level * (high - low))
 
-    fib = high - (level * (high - low))
 
-    # ===== LONG =====
+def exit_fib_touch(c, state, direction, level):
+    fib = _fib_price(state, level)
+
     if direction == "long":
-
-        # price goes DOWN into fib
         if c["low"] <= fib:
             return True, fib, f"Touch Fib{int(level*100)}"
-
-        # fallback confirmation
-        if c["close"] < fib:
-            return True, c["close"], f"Close Below Fib{int(level*100)}"
-
-    # ===== SHORT =====
     else:
-
-        # price goes UP into fib
         if c["high"] >= fib:
             return True, fib, f"Touch Fib{int(level*100)}"
 
-        # fallback confirmation
+    return False, None, None
+
+
+def exit_fib_close(c, state, direction, level):
+    fib = _fib_price(state, level)
+
+    if direction == "long":
+        if c["close"] < fib:
+            return True, c["close"], f"Close Below Fib{int(level*100)}"
+    else:
         if c["close"] > fib:
             return True, c["close"], f"Close Above Fib{int(level*100)}"
 
@@ -411,28 +471,39 @@ def exit_ema_weakness(c, state):
     return False, None, None
 
 
-def exit_trap(c, prev, state, direction):
+def exit_shooting(c, prev, state, direction):
 
-    # indicator-based flag (must exist in df)
-    is_trap = prev.get("Trap", False)
-
-    if not is_trap:
+    if not prev.get("Shooting", False):
         return False, None, None
 
-    # LONG -> close below trap candle
     if direction == "long":
         if c["close"] < prev["low"]:
-            return True, c["close"], "Close Below Trap Candle"
+            return True, c["close"], "Shooting Reversal"
 
-    # SHORT -> close above trap candle
     else:
         if c["close"] > prev["high"]:
-            return True, c["close"], "Close Above Trap Candle"
+            return True, c["close"], "Shooting Reversal"
 
     return False, None, None
 
 
-def exit_trap_2step(c, state, direction, i, entry_index):
+def exit_box(c, prev, state, direction):
+
+    if not prev.get("Box", False):
+        return False, None, None
+
+    if direction == "long":
+        if c["close"] < prev["low"]:
+            return True, c["close"], "Box Breakdown"
+
+    else:
+        if c["close"] > prev["high"]:
+            return True, c["close"], "Box Breakdown"
+
+    return False, None, None
+
+
+def exit_fake_break_2nd(c, state, direction, i, entry_index):
 
     if entry_index is None:
         return False, None, None
@@ -472,21 +543,25 @@ def exit_trap_2step(c, state, direction, i, entry_index):
                 state["trap2_start_idx"] = second_idx + 1
 
         state["trap2_checked"] = True
-        return False, None, None
+        # ⚠️ DO NOT RETURN HERE
 
     # STEP 2 — confirmation (LIMITED WINDOW)
     if state["trap2_active"]:
 
-        # only candle 3 & 4
-        if i > state["trap2_start_idx"] + 1:
+        # ONLY evaluate candle 3
+        if i != state["trap2_start_idx"]:
             return False, None, None
 
         if direction == "long":
             if c["close"] < state["trap2_ref_low"]:
                 return True, c["close"], "2nd Candle Fake Break"
+
         else:
             if c["close"] > state["trap2_ref_high"]:
                 return True, c["close"], "2nd Candle Fake Break"
+
+        # if candle 3 fails → deactivate forever
+        state["trap2_active"] = False
 
     return False, None, None
 
@@ -678,9 +753,23 @@ def run_backtest(df_fast, config):
                 elif rule == "strength":
                     r_hit, r_price, r_reason = exit_strength(c, prev, state, config["direction"])
 
-                elif rule.startswith("fib_"):
-                    level = float(rule.split("_")[1])
-                    r_hit, r_price, r_reason = exit_fib(c, state, config["direction"], level)
+                elif rule.startswith("fib_touch_"):
+                    try:
+                        level = float(rule.split("_")[2])
+                    except (ValueError, IndexError):
+                        continue
+                    r_hit, r_price, r_reason = exit_fib_touch(
+                        c, state, config["direction"], level
+                    )
+
+                elif rule.startswith("fib_close_"):
+                    try:
+                        level = float(rule.split("_")[2])
+                    except (ValueError, IndexError):
+                        continue
+                    r_hit, r_price, r_reason = exit_fib_close(
+                        c, state, config["direction"], level
+                    )
 
                 elif rule == "ema":
                     r_hit, r_price, r_reason = exit_ema(c, state, config["direction"])
@@ -688,11 +777,14 @@ def run_backtest(df_fast, config):
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
 
-                elif rule == "trap":
-                    r_hit, r_price, r_reason = exit_trap(c, prev, state, config["direction"])
+                elif rule == "shooting":
+                    r_hit, r_price, r_reason = exit_shooting(c, prev, state, config["direction"])
 
-                elif rule == "trap2":
-                    r_hit, r_price, r_reason = exit_trap_2step(c, state, config["direction"], i, entry_index)
+                elif rule == "box":
+                    r_hit, r_price, r_reason = exit_box(c, prev, state, config["direction"])
+
+                elif rule == "fake_break_2nd":
+                    r_hit, r_price, r_reason = exit_fake_break_2nd(c, state, config["direction"], i, entry_index)
 
                 else:
                     continue

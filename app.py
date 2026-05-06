@@ -23,13 +23,15 @@ EXIT_RULE_MAP = {
     "Fib61 Close": "fib_close_0.61",
     "Fib78 Close": "fib_close_0.78",
     "Close Above EMA": "ema",
-    "Shooting/Box Reversal": "trap",
-    "2nd Candle Fake Break": "trap2",
+    "Shooting Reversal": "shooting",
+    "Box Breakdown": "box",
+    "2nd Candle Fake Break": "fake_break_2nd",
 }
 
 EXIT_LABELS = {
-    "trap": "Shooting/Box Reversal",
-    "trap2": "2nd Candle Fake Break",
+    "shooting": "Shooting Reversal",
+    "box": "Box Breakdown",
+    "fake_break_2nd": "2nd Candle Fake Break",
 }
 
 
@@ -188,7 +190,7 @@ if run:
 
     if len(res):
         st.dataframe(
-            res["reason"].value_counts().reset_index().rename(columns={"index": "reason"})
+            res["exit_reason"].value_counts().reset_index()
         )
 
     st.subheader("Worst Trades")
