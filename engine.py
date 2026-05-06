@@ -267,6 +267,33 @@ def exit_hard_yclose(c, state, direction):
     return False, None, None
 
 
+def exit_benchmark(c, state, direction):
+
+    entry = state["entry"]
+
+    first_range = abs(
+        state["first_high"] - state["first_low"]
+    )
+
+    dist = first_range * 10
+
+    if direction == "long":
+
+        benchmark = entry - dist
+
+        if c["close"] < benchmark:
+            return True, c["close"], "Benchmark Exit"
+
+    else:
+
+        benchmark = entry + dist
+
+        if c["close"] > benchmark:
+            return True, c["close"], "Benchmark Exit"
+
+    return False, None, None
+
+
 def exit_touch_yhigh(c, state, direction):
 
     if direction == "short":
@@ -408,10 +435,59 @@ def exit_strength(c, prev, state, direction):
 def _fib_price(state, level):
     high = state["first_high"]
     low = state["first_low"]
-    return high - (level * (high - low))
+
+    rng = high - low
+
+    direction = state.get("direction", "long")
+
+    # retracements
+    if level <= 1:
+        return high - (level * rng)
+
+    # extensions
+    if direction == "long":
+        return low - ((level - 1) * rng)
+
+    else:
+        return high + ((level - 1) * rng)
+
+
+def get_hard_risk_level(state, rule):
+
+    if rule is None:
+        return None
+
+    if rule == "yHigh":
+        return state["yHigh"]
+
+    elif rule == "yLow":
+        return state["yLow"]
+
+    elif rule == "yMid":
+        return state["yMid"]
+
+    elif rule == "yClose":
+        return state["yClose"]
+
+    elif rule == "first_high":
+        return state["first_high"]
+
+    elif rule == "first_low":
+        return state["first_low"]
+
+    elif rule.startswith("fib_"):
+        try:
+            level = float(rule.split("_")[1])
+            return _fib_price(state, level)
+        except:
+            return None
+
+    return None
 
 
 def exit_fib_touch(c, state, direction, level):
+    if level not in [0.38, 0.50, 0.61, 0.78, 1.27, 1.61]:
+        return False, None, None
     fib = _fib_price(state, level)
 
     if direction == "long":
@@ -425,6 +501,8 @@ def exit_fib_touch(c, state, direction, level):
 
 
 def exit_fib_close(c, state, direction, level):
+    if level not in [0.38, 0.50, 0.61, 0.78, 1.27, 1.61]:
+        return False, None, None
     fib = _fib_price(state, level)
 
     if direction == "long":
@@ -674,6 +752,7 @@ def run_backtest(df_fast, config):
             "yClose": row0.get("yClose"),
             "first_low": row0.get("low"),
             "first_high": row0.get("high"),
+            "direction": config["direction"],
             "max_mfe": 0,
             "partial_done": False,
             "partial_profit": 0
@@ -682,6 +761,21 @@ def run_backtest(df_fast, config):
             state["second_candle"] = dict(day[entry_index + 1])
         else:
             state["second_candle"] = None
+
+        hard_level = get_hard_risk_level(
+            state,
+            config.get("hard_risk_rule")
+        )
+
+        if hard_level is not None:
+
+            if config["direction"] == "long":
+                hard_risk_points = abs(entry - hard_level)
+            else:
+                hard_risk_points = abs(hard_level - entry)
+
+        else:
+            hard_risk_points = None
 
         # =========================
         # PRE-FILTER LEVELS (FIRST CANDLE)
@@ -771,6 +865,13 @@ def run_backtest(df_fast, config):
                         c, state, config["direction"], level
                     )
 
+                elif rule == "benchmark":
+                    r_hit, r_price, r_reason = exit_benchmark(
+                        c,
+                        state,
+                        config["direction"]
+                    )
+
                 elif rule == "ema":
                     r_hit, r_price, r_reason = exit_ema(c, state, config["direction"])
 
@@ -837,6 +938,7 @@ def run_backtest(df_fast, config):
             "entry": round(entry, 2),
             "exit": round(exit_price, 2),
             "pnl": round(pnl, 2),
+            "hard_risk_points": round(hard_risk_points, 2) if hard_risk_points is not None else None,
             "exit_reason": exit_reason
         })
 

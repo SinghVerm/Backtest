@@ -4,12 +4,12 @@ import pandas as pd
 from engine import run_backtest
 
 EXIT_RULE_MAP = {
-    "Close Below yHigh": "hard_yhigh",
-    "Close Below yLow": "hard_ylow",
-    "Close Below yMid": "hard_ymid",
+    "yHigh Close": "hard_yhigh",
+    "yLow Close": "hard_ylow",
+    "yMid Close": "hard_ymid",
     "Close Below yMid (if yMid < First Low)": "conditional_ymid",
-    "Close Below yClose": "hard_yclose",
-    "Touch Above yHigh": "touch_yhigh",
+    "yClose Close": "hard_yclose",
+    "yHigh Touch": "touch_yhigh",
     "Close Below First Low": "hard_first_low",
     "Close Above First High": "hard_first_high",
     "Weakness at Yesterday Levels": "weakness",
@@ -18,10 +18,15 @@ EXIT_RULE_MAP = {
     "Fib50 Touch": "fib_touch_0.50",
     "Fib61 Touch": "fib_touch_0.61",
     "Fib78 Touch": "fib_touch_0.78",
+    "Fib127 Touch": "fib_touch_1.27",
+    "Fib161 Touch": "fib_touch_1.61",
     "Fib38 Close": "fib_close_0.38",
     "Fib50 Close": "fib_close_0.50",
     "Fib61 Close": "fib_close_0.61",
     "Fib78 Close": "fib_close_0.78",
+    "Fib127 Close": "fib_close_1.27",
+    "Fib161 Close": "fib_close_1.61",
+    "Benchmark Wide Exit": "benchmark",
     "Close Above EMA": "ema",
     "Shooting Reversal": "shooting",
     "Box Breakdown": "box",
@@ -32,6 +37,7 @@ EXIT_LABELS = {
     "shooting": "Shooting Reversal",
     "box": "Box Breakdown",
     "fake_break_2nd": "2nd Candle Fake Break",
+    "benchmark": "Benchmark Wide Exit",
 }
 
 
@@ -61,28 +67,60 @@ all_candles = sorted(df["Candles"].dropna().unique())
 # =========================
 # UI
 # =========================
+signals = sorted(df["Signal"].dropna().unique())
+signal = st.selectbox("Signal", signals)
+
 st.subheader("Candle Filter")
 
-mode = st.radio("Mode", ["Use Selected Only", "Exclude Selected"])
+select_all_candles = st.checkbox("Select all candles", value=False)
+
+if select_all_candles:
+    default_candles = all_candles
+else:
+    default_candles = []
 
 selected_candles = st.multiselect(
     "Candles",
     all_candles,
-    default=[]
+    default=default_candles,
+    disabled=select_all_candles
 )
-
-signals = sorted(df["Signal"].dropna().unique())
-signal = st.selectbox("Signal", signals)
 
 direction = st.selectbox("Direction", ["Long", "Short"])
 
 selected_labels = st.multiselect(
     "Exit Rules (top priority first)",
     list(EXIT_RULE_MAP.keys()),
-    default=["Close Below yHigh"],
+    default=["yHigh Close"],
 )
 
 exit_rules = [EXIT_RULE_MAP[label] for label in selected_labels]
+
+st.subheader("Hard Risk Analysis")
+
+HARD_RISK_MAP = {
+    "None": None,
+    "yHigh": "yHigh",
+    "yLow": "yLow",
+    "yMid": "yMid",
+    "yClose": "yClose",
+    "First High": "first_high",
+    "First Low": "first_low",
+    "Fib38": "fib_0.38",
+    "Fib50": "fib_0.50",
+    "Fib61": "fib_0.61",
+    "Fib78": "fib_0.78",
+    "Fib127": "fib_1.27",
+    "Fib161": "fib_1.61",
+}
+
+hard_risk_label = st.selectbox(
+    "Hard Risk Reference",
+    list(HARD_RISK_MAP.keys()),
+    index=0
+)
+
+hard_risk_rule = HARD_RISK_MAP[hard_risk_label]
 
 st.subheader("MFE Params")
 
@@ -103,6 +141,7 @@ if run:
     config = {
         "signal": signal,
         "exit_rules": exit_rules,
+        "hard_risk_rule": hard_risk_rule,
     }
 
     config["direction"] = direction.lower()
@@ -116,10 +155,8 @@ if run:
         "direction": config["direction"]
     }
 
-    if mode == "Use Selected Only":
+    if selected_candles:
         config["valid_candles"] = selected_candles
-    else:
-        config["invalid_candles"] = selected_candles
 
     res = run_backtest(df, config)
     if res.empty:
@@ -131,7 +168,8 @@ if run:
         res.style.format({
             "entry": "{:.2f}",
             "exit": "{:.2f}",
-            "pnl": "{:.2f}"
+            "pnl": "{:.2f}",
+            "hard_risk_points": lambda x: "" if pd.isna(x) else f"{x:.2f}",
         }),
         use_container_width=True
     )
@@ -151,6 +189,7 @@ if run:
             "Trades": len(res),
             "Signal Days": res["date"].nunique(),
             "Total PnL": round(res["pnl"].sum(),2),
+            "Avg Hard Risk": round(res["hard_risk_points"].mean(), 2),
             "Avg PnL": round(res["pnl"].mean(),2),
             "Winrate %": round(len(wins)/len(res)*100,2),
             "Avg Win": round(avg_win,2),
@@ -186,15 +225,39 @@ if run:
         candle_stats = res.groupby("candle")["pnl"].agg(["count", "mean", "sum"]).reset_index()
         st.dataframe(candle_stats)
 
+    st.subheader("Candle Risk Breakdown")
+
+    risk_stats = (
+        res.groupby("candle")
+        .agg({
+            "hard_risk_points": ["mean", "max"],
+            "pnl": ["mean", "sum", "count"]
+        })
+    )
+
+    risk_stats.columns = [
+        "avg_risk",
+        "max_risk",
+        "avg_pnl",
+        "total_pnl",
+        "trades"
+    ]
+
+    risk_stats = risk_stats.reset_index()
+
+    risk_stats = risk_stats.sort_values(
+        "avg_risk",
+        ascending=False
+    )
+
+    st.dataframe(risk_stats, use_container_width=True)
+
     st.subheader("Exit Breakdown")
 
     if len(res):
         st.dataframe(
             res["exit_reason"].value_counts().reset_index()
         )
-
-    st.subheader("Worst Trades")
-    st.dataframe(res.sort_values("pnl").head(10))
 
     st.subheader("Recent Tests (Comparison)")
 
