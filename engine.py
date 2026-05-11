@@ -433,21 +433,37 @@ def exit_strength(c, prev, state, direction):
 
 
 def _fib_price(state, level):
+
     high = state["first_high"]
     low = state["first_low"]
-
     rng = high - low
 
     direction = state.get("direction", "long")
 
-    # retracements
+    # =========================
+    # RETRACEMENTS
+    # =========================
     if level <= 1:
-        return high - (level * rng)
 
-    # extensions
+        # LONG: draw TOP → BOTTOM
+        # 0% = high, 100% = low
+        if direction == "long":
+            return high - (level * rng)
+
+        # SHORT: draw BOTTOM → TOP
+        # 0% = low, 100% = high
+        else:
+            return low + (level * rng)
+
+    # =========================
+    # EXTENSIONS
+    # =========================
+
+    # LONG extension BELOW low
     if direction == "long":
         return low - ((level - 1) * rng)
 
+    # SHORT extension ABOVE high
     else:
         return high + ((level - 1) * rng)
 
@@ -475,6 +491,9 @@ def get_hard_risk_level(state, rule):
     elif rule == "first_low":
         return state["first_low"]
 
+    elif rule == "ema100":
+        return state.get("ema100")
+
     elif rule.startswith("fib_"):
         try:
             level = float(rule.split("_")[1])
@@ -483,6 +502,44 @@ def get_hard_risk_level(state, rule):
             return None
 
     return None
+
+
+def get_exit_reference_levels(state, exit_rules):
+
+    levels = []
+
+    for rule in exit_rules:
+
+        if rule == "hard_yhigh":
+            levels.append(state["yHigh"])
+
+        elif rule == "hard_ylow":
+            levels.append(state["yLow"])
+
+        elif rule == "hard_ymid":
+            levels.append(state["yMid"])
+
+        elif rule == "hard_yclose":
+            levels.append(state["yClose"])
+
+        elif rule == "touch_yhigh":
+            levels.append(state["yHigh"])
+
+        elif rule == "hard_first_low":
+            levels.append(state["first_low"])
+
+        elif rule == "hard_first_high":
+            levels.append(state["first_high"])
+
+        elif rule.startswith("fib_touch_") or rule.startswith("fib_close_"):
+
+            try:
+                level = float(rule.split("_")[2])
+                levels.append(_fib_price(state, level))
+            except Exception:
+                pass
+
+    return [x for x in levels if x is not None]
 
 
 def exit_fib_touch(c, state, direction, level):
@@ -515,16 +572,39 @@ def exit_fib_close(c, state, direction, level):
     return False, None, None
 
 
-def exit_ema(c, state, direction):
+def exit_ema(c, prev, state, direction):
 
-    ema = c["ema100"]  # already in your data
+    ema = c["ema100"]
+    entry = state["entry"]
 
-    if direction == "short":
-        if c["close"] > ema:
-            return True, c["close"], "Close Above EMA"
+    if "ema_ref" not in state:
+        state["ema_ref"] = None
+
+    if direction == "long":
+
+        if ema <= entry:
+            return False, None, None
+
+        if c["high"] >= ema and c["close"] < ema:
+            state["ema_ref"] = c["low"]
+            return False, None, None
+
+        if state["ema_ref"] is not None:
+            if c["close"] < state["ema_ref"]:
+                return True, c["close"], "EMA Rejection Break"
+
     else:
-        if c["close"] < ema:
-            return True, c["close"], "Close Below EMA"
+
+        if ema >= entry:
+            return False, None, None
+
+        if c["low"] <= ema and c["close"] > ema:
+            state["ema_ref"] = c["high"]
+            return False, None, None
+
+        if state["ema_ref"] is not None:
+            if c["close"] > state["ema_ref"]:
+                return True, c["close"], "EMA Rejection Break"
 
     return False, None, None
 
@@ -680,7 +760,7 @@ def exit_mfe(c, state, params):
 # =========================
 # MAIN ENGINE
 # =========================
-def run_backtest(df_fast, config):
+def run_backtest(df_fast, config, *, streamlit_warnings=False):
     """
     df_fast: output of prepare_df_fast (dict with records + spans), or a DataFrame (converted once).
     """
@@ -743,6 +823,102 @@ def run_backtest(df_fast, config):
 
         entry = day[entry_index]["close"]
 
+        # =========================
+        # VALID EXIT FILTER
+        # =========================
+
+        valid_exit_rules = []
+
+        temp_state = {
+            "direction": config["direction"],
+            "yHigh": row0.get("yHigh"),
+            "yLow": row0.get("yLow"),
+            "yMid": row0.get("yMid"),
+            "yClose": row0.get("yClose"),
+            "first_low": row0.get("low"),
+            "first_high": row0.get("high"),
+            "ema100": row0.get("ema100"),
+        }
+
+        ignored_exits = []
+
+        for rule in config["exit_rules"]:
+
+            lvl = None
+            is_level_exit = False
+
+            if rule == "hard_yhigh":
+                lvl = temp_state["yHigh"]
+                is_level_exit = True
+
+            elif rule == "hard_ylow":
+                lvl = temp_state["yLow"]
+                is_level_exit = True
+
+            elif rule == "hard_ymid":
+                lvl = temp_state["yMid"]
+                is_level_exit = True
+
+            elif rule == "hard_yclose":
+                lvl = temp_state["yClose"]
+                is_level_exit = True
+
+            elif rule == "touch_yhigh":
+                lvl = temp_state["yHigh"]
+                is_level_exit = True
+
+            elif rule == "hard_first_low":
+                lvl = temp_state["first_low"]
+                is_level_exit = True
+
+            elif rule == "hard_first_high":
+                lvl = temp_state["first_high"]
+                is_level_exit = True
+
+            elif rule.startswith("fib_touch_") or rule.startswith("fib_close_"):
+
+                is_level_exit = True
+
+                try:
+                    level = float(rule.split("_")[2])
+                    lvl = _fib_price(temp_state, level)
+                except Exception:
+                    pass
+
+            # pattern exits stay valid
+            if not is_level_exit:
+                valid_exit_rules.append(rule)
+                continue
+
+            if lvl is None:
+                continue
+
+            # LONG: fixed exits must be below entry
+            if config["direction"] == "long":
+
+                if lvl < entry:
+                    valid_exit_rules.append(rule)
+                else:
+                    ignored_exits.append(rule)
+
+            # SHORT: fixed exits must be above entry
+            else:
+
+                if lvl > entry:
+                    valid_exit_rules.append(rule)
+                else:
+                    ignored_exits.append(rule)
+
+        if ignored_exits:
+            if streamlit_warnings:
+                import streamlit as st
+                st.warning(
+                    "Ignored exits: " +
+                    ", ".join(ignored_exits)
+                )
+            else:
+                print("Ignored exits:", ignored_exits)
+
         # ===== state
         state = {
             "entry": entry,
@@ -752,6 +928,7 @@ def run_backtest(df_fast, config):
             "yClose": row0.get("yClose"),
             "first_low": row0.get("low"),
             "first_high": row0.get("high"),
+            "ema100": row0.get("ema100"),
             "direction": config["direction"],
             "max_mfe": 0,
             "partial_done": False,
@@ -766,6 +943,44 @@ def run_backtest(df_fast, config):
             state,
             config.get("hard_risk_rule")
         )
+
+        exit_levels = get_exit_reference_levels(
+            state,
+            valid_exit_rules
+        )
+
+        # hard risk must be on correct side of entry
+        if hard_level is not None:
+
+            if config["direction"] == "long":
+                if hard_level >= entry:
+                    continue
+
+            else:
+                if hard_level <= entry:
+                    continue
+
+        if hard_level is not None and exit_levels:
+
+            if config["direction"] == "long":
+
+                lowest_exit = min(exit_levels)
+
+                if hard_level < lowest_exit:
+                    continue
+
+                if hard_level >= entry:
+                    continue
+
+            else:
+
+                highest_exit = max(exit_levels)
+
+                if hard_level > highest_exit:
+                    continue
+
+                if hard_level <= entry:
+                    continue
 
         if hard_level is not None:
 
@@ -815,7 +1030,7 @@ def run_backtest(df_fast, config):
 
             hits = []
 
-            for rule in config["exit_rules"]:
+            for rule in valid_exit_rules:
 
                 if rule == "hard_yhigh":
                     r_hit, r_price, r_reason = exit_hard_yhigh(c, state, config["direction"])
@@ -873,7 +1088,12 @@ def run_backtest(df_fast, config):
                     )
 
                 elif rule == "ema":
-                    r_hit, r_price, r_reason = exit_ema(c, state, config["direction"])
+                    r_hit, r_price, r_reason = exit_ema(
+                        c,
+                        prev,
+                        state,
+                        config["direction"]
+                    )
 
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
@@ -939,7 +1159,8 @@ def run_backtest(df_fast, config):
             "exit": round(exit_price, 2),
             "pnl": round(pnl, 2),
             "hard_risk_points": round(hard_risk_points, 2) if hard_risk_points is not None else None,
-            "exit_reason": exit_reason
+            "exit_reason": exit_reason,
+            "ignored_exits": ", ".join(ignored_exits),
         })
 
     return pd.DataFrame(trades)

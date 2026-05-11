@@ -4,6 +4,7 @@ import pandas as pd
 from engine import run_backtest
 
 EXIT_RULE_MAP = {
+    "Benchmark Wide Exit": "benchmark",
     "yHigh Close": "hard_yhigh",
     "yLow Close": "hard_ylow",
     "yMid Close": "hard_ymid",
@@ -26,7 +27,6 @@ EXIT_RULE_MAP = {
     "Fib78 Close": "fib_close_0.78",
     "Fib127 Close": "fib_close_1.27",
     "Fib161 Close": "fib_close_1.61",
-    "Benchmark Wide Exit": "benchmark",
     "Close Above EMA": "ema",
     "Shooting Reversal": "shooting",
     "Box Breakdown": "box",
@@ -42,7 +42,7 @@ EXIT_LABELS = {
 
 
 st.set_page_config(layout="wide")
-st.title("Trading System Lab (Modular Engine)")
+st.title("Trading System Lab")
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -91,7 +91,7 @@ direction = st.selectbox("Direction", ["Long", "Short"])
 selected_labels = st.multiselect(
     "Exit Rules (top priority first)",
     list(EXIT_RULE_MAP.keys()),
-    default=["yHigh Close"],
+    default=[],
 )
 
 exit_rules = [EXIT_RULE_MAP[label] for label in selected_labels]
@@ -106,6 +106,7 @@ HARD_RISK_MAP = {
     "yClose": "yClose",
     "First High": "first_high",
     "First Low": "first_low",
+    "EMA100": "ema100",
     "Fib38": "fib_0.38",
     "Fib50": "fib_0.50",
     "Fib61": "fib_0.61",
@@ -124,9 +125,31 @@ hard_risk_rule = HARD_RISK_MAP[hard_risk_label]
 
 st.subheader("MFE Params")
 
-partial = st.number_input("Partial %", value=0.18)
-lock    = st.number_input("Lock %", value=0.25)
-trail   = st.number_input("Trail %", value=0.12)
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    partial = st.number_input(
+        "Partial %",
+        value=0.18,
+        step=0.01,
+        format="%.2f"
+    )
+
+with c2:
+    lock = st.number_input(
+        "Lock %",
+        value=0.25,
+        step=0.01,
+        format="%.2f"
+    )
+
+with c3:
+    trail = st.number_input(
+        "Trail %",
+        value=0.12,
+        step=0.01,
+        format="%.2f"
+    )
 
 run = st.button("Run Backtest")
 
@@ -158,7 +181,7 @@ if run:
     if selected_candles:
         config["valid_candles"] = selected_candles
 
-    res = run_backtest(df, config)
+    res = run_backtest(df, config, streamlit_warnings=True)
     if res.empty:
         st.warning("No trades found")
         st.stop()
@@ -258,6 +281,39 @@ if run:
         st.dataframe(
             res["exit_reason"].value_counts().reset_index()
         )
+
+    st.subheader("Ignored Exit Breakdown")
+
+    if "ignored_exits" in res.columns:
+
+        ignored_counts = {}
+
+        for x in res["ignored_exits"].dropna():
+            if not x:
+                continue
+
+            for item in str(x).split(","):
+                item = item.strip()
+                if not item:
+                    continue
+
+                ignored_counts[item] = ignored_counts.get(item, 0) + 1
+
+        if ignored_counts:
+            ignored_df = (
+                pd.DataFrame(
+                    ignored_counts.items(),
+                    columns=["ignored_exit", "days"]
+                )
+                .sort_values("days", ascending=False)
+            )
+
+            st.dataframe(
+                ignored_df,
+                use_container_width=True
+            )
+        else:
+            st.info("No exits ignored.")
 
     st.subheader("Recent Tests (Comparison)")
 
