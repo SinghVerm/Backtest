@@ -949,38 +949,44 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
             valid_exit_rules
         )
 
-        # hard risk must be on correct side of entry
+        # =========================
+        # MANUAL HARD RISK VALIDATION
+        # Do not skip the trade.
+        # If hard risk is invalid/too wide, just don't calculate hard risk.
+        # =========================
+
+        hard_risk_valid = True
+
         if hard_level is not None:
 
             if config["direction"] == "long":
+
+                # hard risk must be below entry
                 if hard_level >= entry:
-                    continue
+                    hard_risk_valid = False
 
-            else:
-                if hard_level <= entry:
-                    continue
+                # if fixed exits exist, hard risk should not be wider than exit envelope
+                if exit_levels:
+                    lowest_exit = min(exit_levels)
 
-        if hard_level is not None and exit_levels:
-
-            if config["direction"] == "long":
-
-                lowest_exit = min(exit_levels)
-
-                if hard_level < lowest_exit:
-                    continue
-
-                if hard_level >= entry:
-                    continue
+                    if hard_level < lowest_exit:
+                        hard_risk_valid = False
 
             else:
 
-                highest_exit = max(exit_levels)
-
-                if hard_level > highest_exit:
-                    continue
-
+                # hard risk must be above entry
                 if hard_level <= entry:
-                    continue
+                    hard_risk_valid = False
+
+                # if fixed exits exist, hard risk should not be wider than exit envelope
+                if exit_levels:
+                    highest_exit = max(exit_levels)
+
+                    if hard_level > highest_exit:
+                        hard_risk_valid = False
+
+        if not hard_risk_valid:
+            hard_level = None
 
         if hard_level is not None:
 
