@@ -96,7 +96,7 @@ selected_labels = st.multiselect(
 
 exit_rules = [EXIT_RULE_MAP[label] for label in selected_labels]
 
-st.subheader("Hard Risk Analysis")
+st.subheader("Stop Loss Analysis")
 
 HARD_RISK_MAP = {
     "None": None,
@@ -116,7 +116,7 @@ HARD_RISK_MAP = {
 }
 
 hard_risk_label = st.selectbox(
-    "Hard Risk Reference",
+    "Stop Loss Reference",
     list(HARD_RISK_MAP.keys()),
     index=0
 )
@@ -186,13 +186,17 @@ if run:
         st.warning("No trades found")
         st.stop()
 
+    res_display = res.rename(columns={
+        "hard_risk_points": "stop_loss_points"
+    })
+
     st.subheader("Trades")
     st.dataframe(
-        res.style.format({
+        res_display.style.format({
             "entry": "{:.2f}",
             "exit": "{:.2f}",
             "pnl": "{:.2f}",
-            "hard_risk_points": lambda x: "" if pd.isna(x) else f"{x:.2f}",
+            "stop_loss_points": lambda x: "" if pd.isna(x) else f"{x:.2f}",
         }),
         use_container_width=True
     )
@@ -212,7 +216,7 @@ if run:
             "Trades": len(res),
             "Signal Days": res["date"].nunique(),
             "Total PnL": round(res["pnl"].sum(),2),
-            "Avg Hard Risk": round(res["hard_risk_points"].mean(), 2),
+            "Avg Stop Loss": round(res["hard_risk_points"].mean(), 2),
             "Avg PnL": round(res["pnl"].mean(),2),
             "Winrate %": round(len(wins)/len(res)*100,2),
             "Avg Win": round(avg_win,2),

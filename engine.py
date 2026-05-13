@@ -87,8 +87,6 @@ def prepare_df(df):
         "EMA 100": "ema100"
     }, inplace=True)
 
-    df = mark_trap(df)
-
     return df
 
 
@@ -107,6 +105,90 @@ def _compute_day_spans(records):
     return spans
 
 
+def _small_body_row(open_, high, low, close):
+    body = abs(close - open_)
+    upper = high - max(close, open_)
+    lower = min(close, open_) - low
+    return body < (upper + lower)
+
+
+def _annotate_shooting_box(records, spans):
+    if not records:
+        return
+
+    range_pct = lambda o, h, low: ((h - low) / o * 100) if o else 0.0
+
+    for _, (lo, hi) in spans.items():
+        day_high_so_far = float("-inf")
+
+        for idx in range(lo, hi):
+            r = records[idx]
+            rh = float(r["high"])
+            day_high_so_far = max(day_high_so_far, rh)
+
+            if idx == lo:
+                r["Shooting"] = False
+                r["Box"] = False
+                continue
+
+            prev = records[idx - 1]
+            prev2 = records[idx - 2] if idx >= lo + 2 else None
+
+            op, hi_, low, cl = (
+                float(r["open"]),
+                rh,
+                float(r["low"]),
+                float(r["close"]),
+            )
+
+            o_p, h_p, l_p, c_p = (
+                float(prev["open"]),
+                float(prev["high"]),
+                float(prev["low"]),
+                float(prev["close"]),
+            )
+
+            body_red = cl < op
+            upper_wick = hi_ - max(op, cl)
+            lower_wick = min(op, cl) - low
+            upper_wick_more = upper_wick > lower_wick
+            broke_prev_high = hi_ > h_p
+            closed_below_prev_high = cl < h_p
+
+            shooting = bool(
+                body_red
+                and upper_wick_more
+                and broke_prev_high
+                and closed_below_prev_high
+                and (hi_ >= day_high_so_far)
+            )
+
+            box = False
+
+            if prev2 is not None:
+                o2, h2, l2, c2 = (
+                    float(prev2["open"]),
+                    float(prev2["high"]),
+                    float(prev2["low"]),
+                    float(prev2["close"]),
+                )
+
+                if o2 != 0 and range_pct(o2, h2, l2) <= 0.25:
+                    inside1 = l2 <= c_p <= h2
+                    inside2 = l2 <= cl <= h2
+
+                    sb0 = _small_body_row(o2, h2, l2, c2)
+                    sb1 = _small_body_row(o_p, h_p, l_p, c_p)
+                    sb2 = _small_body_row(op, hi_, low, cl)
+
+                    box = bool(
+                        sb0 and sb1 and sb2 and inside1 and inside2
+                    )
+
+            r["Shooting"] = shooting
+            r["Box"] = box
+
+
 def prepare_df_fast(df_raw):
     """Load once: parsed DataFrame → row dicts + per-day index ranges (no pandas in hot loop)."""
     df = prepare_df(df_raw)
@@ -115,6 +197,7 @@ def prepare_df_fast(df_raw):
         raise ValueError("Inconsistent yHigh/yLow/yMid/yClose values found within one or more dates")
     records = df.to_dict("records")
     spans = _compute_day_spans(records)
+    _annotate_shooting_box(records, spans)
     return {"records": records, "spans": spans}
 
 
@@ -800,21 +883,9 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
                 continue
 
         # ===== entry
-        signal = config["signal"]
-        direction = config["direction"]
-
         entry_index = 0
 
-        if signal == "Gap Low" and direction == "short":
-            if len(day) < 2:
-                continue
-            row1 = day[1]
-            if row1["low"] <= row0["low"]:
-                entry_index = 1
-            else:
-                continue
-
-        elif config["signal"] == "EMA Strength LONG":
+        if config["signal"] == "EMA Strength LONG":
             if row0["Candles"] not in ["Strong Green", "Green"]:
                 continue
 
