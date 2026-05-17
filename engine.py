@@ -217,13 +217,17 @@ def get_days_from_records(records, signal):
 def _floating_open_pnl(c, state, entry, config):
     params = config["params"]
     direction = config["direction"]
+
     if not state.get("partial_done"):
         if direction == "long":
             return 2 * (c["close"] - entry)
         return 2 * (entry - c["close"])
-    part = _entry_scaled(entry, params["partial"])
+
+    part = state.get("partial_profit", 0)
+
     if direction == "long":
         return part + (c["close"] - entry)
+
     return part + (entry - c["close"])
 
 
@@ -692,6 +696,27 @@ def exit_ema(c, prev, state, direction):
     return False, None, None
 
 
+def exit_ema_signal_hard(c, state, direction):
+
+    ema = c.get("ema100")
+    signal = state.get("signal")
+
+    if ema is None:
+        return False, None, None
+
+    # Only for EMA Strength long setups
+    if signal == "EMA Strength" and direction == "long":
+        if c["close"] < ema:
+            return True, c["close"], "Close Below EMA"
+
+    # Only for EMA Weakness short setups
+    if signal == "EMA Weakness" and direction == "short":
+        if c["close"] > ema:
+            return True, c["close"], "Close Above EMA"
+
+    return False, None, None
+
+
 def exit_ema_weakness(c, state):
 
     ema = c["ema100"]
@@ -814,8 +839,18 @@ def _entry_scaled(entry, v):
     return entry * (v / 100)
 
 
+def _mfe_threshold_points(entry, state, params, key):
+    value = params.get(key)
+
+    if value is None:
+        return 0.0
+
+    return _entry_scaled(entry, value)
+
+
 def exit_mfe(c, state, params):
     entry = state["entry"]
+
     if params["direction"] == "long":
         pnl_now = c["close"] - entry
         mfe_now = c["high"] - entry
@@ -825,15 +860,25 @@ def exit_mfe(c, state, params):
 
     state["max_mfe"] = max(state["max_mfe"], mfe_now)
 
-    partial_thr = _entry_scaled(entry, params["partial"])
+    partial_thr = _mfe_threshold_points(entry, state, params, "partial")
+
+    # =========================
+    # NORMAL PROFIT PARTIAL
+    # =========================
     if not state["partial_done"] and state["max_mfe"] >= partial_thr:
         state["partial_done"] = True
-        state["partial_profit"] = partial_thr / 2
 
-    lock_thr = _entry_scaled(entry, params["lock"])
-    trail_thr = _entry_scaled(entry, params["trail"])
+        # 2-lot logic:
+        # one lot booked at partial threshold,
+        # one lot remains open
+        state["partial_profit"] = partial_thr
+
+    lock_thr = _mfe_threshold_points(entry, state, params, "lock")
+    trail_thr = _mfe_threshold_points(entry, state, params, "trail")
+
     if state["max_mfe"] >= lock_thr:
         giveback = state["max_mfe"] - pnl_now
+
         if giveback >= trail_thr:
             return True, c["close"], "Trail Exit"
 
@@ -893,6 +938,32 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
                 continue
 
         entry = day[entry_index]["close"]
+
+        # =========================
+        # PRIOR DAY EXTENSION MOVE
+        # For manual inspection only
+        # =========================
+        if config["direction"] == "long":
+            extension_ref = row0.get("yLow")
+            extension_from = "yLow"
+
+            if extension_ref is not None and extension_ref != 0:
+                prior_move_points = entry - extension_ref
+                prior_move_pct = (prior_move_points / extension_ref) * 100
+            else:
+                prior_move_points = None
+                prior_move_pct = None
+
+        else:
+            extension_ref = row0.get("yHigh")
+            extension_from = "yHigh"
+
+            if extension_ref is not None and extension_ref != 0:
+                prior_move_points = extension_ref - entry
+                prior_move_pct = (prior_move_points / extension_ref) * 100
+            else:
+                prior_move_points = None
+                prior_move_pct = None
 
         # =========================
         # VALID EXIT FILTER
@@ -1001,9 +1072,10 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
             "first_high": row0.get("high"),
             "ema100": row0.get("ema100"),
             "direction": config["direction"],
+            "signal": config["signal"],
             "max_mfe": 0,
             "partial_done": False,
-            "partial_profit": 0
+            "partial_profit": 0,
         }
         if entry_index + 1 < len(day):
             state["second_candle"] = dict(day[entry_index + 1])
@@ -1172,6 +1244,13 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
                         config["direction"]
                     )
 
+                elif rule == "ema_signal_hard":
+                    r_hit, r_price, r_reason = exit_ema_signal_hard(
+                        c,
+                        state,
+                        config["direction"]
+                    )
+
                 elif rule == "ema_weakness":
                     r_hit, r_price, r_reason = exit_ema_weakness(c, state)
 
@@ -1212,16 +1291,13 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
         if exit_price is None:
             exit_price = day[-1]["close"]
 
-        params = config["params"]
         if state["partial_done"]:
-            partial_points = _entry_scaled(entry, params["partial"])
+            part = state.get("partial_profit", 0)
 
             if config["direction"] == "long":
-                remaining_points = (exit_price - entry)
+                pnl = part + (exit_price - entry)
             else:
-                remaining_points = (entry - exit_price)
-
-            pnl = partial_points + remaining_points
+                pnl = part + (entry - exit_price)
 
         else:
             if config["direction"] == "long":
@@ -1236,6 +1312,9 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
             "exit": round(exit_price, 2),
             "pnl": round(pnl, 2),
             "hard_risk_points": round(hard_risk_points, 2) if hard_risk_points is not None else None,
+            "extension_from": extension_from,
+            "prior_move_points": round(prior_move_points, 2) if prior_move_points is not None else None,
+            "prior_move_pct": round(prior_move_pct, 2) if prior_move_pct is not None else None,
             "exit_reason": exit_reason,
             "ignored_exits": ", ".join(ignored_exits),
         })
