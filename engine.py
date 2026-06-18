@@ -64,14 +64,33 @@ def mark_trap(df):
     return df
 
 
+def to_ist_naive_datetime(col):
+    s = col.astype(str)
+
+    has_tz = s.str.contains(
+        r"(Z$|[+-]\d{2}:\d{2}$)",
+        regex=True,
+        na=False
+    ).any()
+
+    if has_tz:
+        return (
+            pd.to_datetime(col, errors="coerce", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+            .dt.tz_localize(None)
+        )
+
+    return pd.to_datetime(col, errors="coerce")
+
+
 def prepare_df(df):
 
     df.columns = df.columns.str.strip()
 
     if "time" in df.columns:
-        df["datetime"] = pd.to_datetime(df["time"])
+        df["datetime"] = to_ist_naive_datetime(df["time"])
     elif "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"])
+        df["datetime"] = to_ist_naive_datetime(df["datetime"])
     else:
         raise Exception("No datetime column")
 
@@ -928,7 +947,7 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
                 continue
 
         # ===== entry
-        entry_index = 0
+        entry_index = int(config.get("entry_index", 0))
 
         if config["signal"] == "EMA Strength LONG":
             if row0["Candles"] not in ["Strong Green", "Green"]:
@@ -1307,6 +1326,7 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
 
         trades.append({
             "date": d,
+            "trade_status": "Trade",
             "candle": row0["Candles"],
             "entry": round(entry, 2),
             "exit": round(exit_price, 2),
@@ -1320,3 +1340,1397 @@ def run_backtest(df_fast, config, *, streamlit_warnings=False):
         })
 
     return pd.DataFrame(trades)
+
+
+# =========================
+# VWAP IDEA LAB
+# =========================
+
+IDEA_PATTERN_CANDLE_RULES = {
+    "After 1st 30m close": "after_first_close",
+    "1st candle": "candle_1",
+    "2nd candle": "candle_2",
+    "3rd candle": "candle_3",
+    "4th candle": "candle_4",
+}
+
+IDEA_PATTERN_ACTION_RULES = {
+    "None - no pattern condition": "none",
+
+    "Close above VWAP level": "close_above_vwap",
+    "Close below VWAP level": "close_below_vwap",
+
+    "Touch VWAP level and close above": "touch_vwap_close_above",
+    "Touch VWAP level and close below": "touch_vwap_close_below",
+
+    "Touch all 3 VWAP lines and close above Upper": "touch_all3_close_above_upper",
+    "Touch all 3 VWAP lines and close below Lower": "touch_all3_close_below_lower",
+
+    "Open between Middle/Upper and close below Lower": "open_mid_upper_close_below_lower",
+    "Open between Lower/Middle and close above Upper": "open_lower_mid_close_above_upper",
+
+    "Touch first high and close below": "touch_first_high_close_below",
+    "Touch first high AND close below VWAP level": "touch_first_high_and_close_below_vwap",
+    "Close above first high": "close_above_first_high",
+
+    "Touch first low and close above": "touch_first_low_close_above",
+    "Touch first low AND close above VWAP level": "touch_first_low_and_close_above_vwap",
+    "Close below first low": "close_below_first_low",
+
+    "Open above Upper and close below Lower": "open_above_upper_close_below_lower",
+    "Open below Lower and close above Upper": "open_below_lower_close_above_upper",
+
+    "Later 30m close above selected VWAP level": "later_30m_close_above_vwap",
+    "Later 30m close below selected VWAP level": "later_30m_close_below_vwap",
+    "Later 30m touch selected VWAP level and close above": "later_30m_touch_vwap_close_above",
+    "Later 30m touch selected VWAP level and close below": "later_30m_touch_vwap_close_below",
+
+    "Later 30m RSI above RSI-based MA": "later_30m_rsi_above_ma",
+    "Later 30m RSI below RSI-based MA": "later_30m_rsi_below_ma",
+    "Later 30m RSI crosses above RSI-based MA": "later_30m_rsi_cross_above_ma",
+    "Later 30m RSI crosses below RSI-based MA": "later_30m_rsi_cross_below_ma",
+}
+
+IDEA_VWAP_LEVEL_RULES = {
+    "Middle VWAP": "VWAP",
+    "Upper Band #1": "Upper Band #1",
+    "Lower Band #1": "Lower Band #1",
+}
+
+IDEA_ENTRY_RULES = {
+    "None - enter on pattern candle close": "pattern_close",
+
+    "Later 30m close above selected VWAP level": "later_30m_close_above_vwap",
+    "Later 30m close below selected VWAP level": "later_30m_close_below_vwap",
+    "Later 30m touch selected VWAP level and close above": "later_30m_touch_vwap_close_above",
+    "Later 30m touch selected VWAP level and close below": "later_30m_touch_vwap_close_below",
+
+    "Later 30m RSI above RSI-based MA": "later_30m_rsi_above_ma",
+    "Later 30m RSI below RSI-based MA": "later_30m_rsi_below_ma",
+    "Later 30m RSI crosses above RSI-based MA": "later_30m_rsi_cross_above_ma",
+    "Later 30m RSI crosses below RSI-based MA": "later_30m_rsi_cross_below_ma",
+
+    "Later 5m close above selected VWAP level": "later_5m_close_above_vwap",
+    "Later 5m close below selected VWAP level": "later_5m_close_below_vwap",
+    "Later 5m touch selected VWAP level and close above": "later_5m_touch_vwap_close_above",
+    "Later 5m touch selected VWAP level and close below": "later_5m_touch_vwap_close_below",
+
+    "Later 5m close above Middle VWAP": "later_5m_close_above_middle",
+    "Later 5m close below Middle VWAP": "later_5m_close_below_middle",
+}
+
+IDEA_EXIT_RULES = {
+    # =========================
+    # VWAP SL EXITS
+    # =========================
+    "VWAP 30m SL: close below/above Middle VWAP": "30m_middle",
+    "VWAP 30m SL: close below 2nd low / above 2nd high": "30m_second_hilo",
+    "VWAP 30m SL: close below 1st low / above 1st high": "30m_first_hilo",
+    "VWAP 5m SL: close below/above Middle VWAP": "5m_middle",
+    "VWAP 5m SL: close below 1st low / above 1st high": "5m_first_hilo",
+    "VWAP 5m SL: close below/above 1st candle 50% mid": "5m_first_mid",
+
+    # =========================
+    # SAME SL EXITS AS UPPER SECTION
+    # =========================
+    "Benchmark Wide Exit": "benchmark",
+    "yHigh Close": "hard_yhigh",
+    "yLow Close": "hard_ylow",
+    "yMid Close": "hard_ymid",
+    "Close Below yMid (if yMid < First Low)": "conditional_ymid",
+    "yClose Close": "hard_yclose",
+    "yHigh Touch": "touch_yhigh",
+    "Close Below First Low": "hard_first_low",
+    "Close Above First High": "hard_first_high",
+    "Weakness at Yesterday Levels": "weakness",
+    "Strength at Yesterday Levels": "strength",
+
+    "Fib38 Touch": "fib_touch_0.38",
+    "Fib50 Touch": "fib_touch_0.50",
+    "Fib61 Touch": "fib_touch_0.61",
+    "Fib78 Touch": "fib_touch_0.78",
+    "Fib127 Touch": "fib_touch_1.27",
+    "Fib161 Touch": "fib_touch_1.61",
+
+    "Fib38 Close": "fib_close_0.38",
+    "Fib50 Close": "fib_close_0.50",
+    "Fib61 Close": "fib_close_0.61",
+    "Fib78 Close": "fib_close_0.78",
+    "Fib127 Close": "fib_close_1.27",
+    "Fib161 Close": "fib_close_1.61",
+
+    "Close Above EMA": "ema",
+    "EMA Signal Hard Exit": "ema_signal_hard",
+    "Shooting Reversal": "shooting",
+    "Box Breakdown": "box",
+    "2nd Candle Fake Break": "fake_break_2nd",
+}
+
+
+VWAP_IDEA_REQUIRED_COLUMNS = [
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "VWAP",
+    "Upper Band #1",
+    "Lower Band #1",
+    "RSI",
+    "RSI-based MA",
+]
+
+
+def validate_vwap_required_columns(df_raw):
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
+    df = df.rename(columns={
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+    })
+
+    missing = []
+    for col in VWAP_IDEA_REQUIRED_COLUMNS:
+        if col == "time":
+            if not any(name in df.columns for name in ("time", "Date", "datetime")):
+                missing.append("time")
+        elif col not in df.columns:
+            missing.append(col)
+
+    return missing
+
+
+def prepare_idea_df(df_raw):
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
+    if "time" in df.columns:
+        df["datetime"] = to_ist_naive_datetime(df["time"])
+    elif "Date" in df.columns:
+        df["datetime"] = to_ist_naive_datetime(df["Date"])
+    elif "datetime" in df.columns:
+        df["datetime"] = to_ist_naive_datetime(df["datetime"])
+    else:
+        raise ValueError("No time/Date/datetime column found")
+
+    rename_map = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Yesterday High": "yHigh",
+        "Yesterday Low": "yLow",
+        "Yesterday Mid": "yMid",
+        "Yesterday Close": "yClose",
+        "EMA 100": "ema100",
+    }
+    df = df.rename(columns=rename_map)
+    df["date"] = df["datetime"].dt.date
+    return df.sort_values(["date", "datetime"]).reset_index(drop=True)
+
+
+def _touches(row, value):
+    if pd.isna(value):
+        return False
+    return float(row["low"]) <= float(value) <= float(row["high"])
+
+
+def _touches_any_vwap(row):
+    return (
+        _touches(row, row.get("Lower Band #1"))
+        or _touches(row, row.get("VWAP"))
+        or _touches(row, row.get("Upper Band #1"))
+    )
+
+
+def _touches_all_3_vwap(row):
+    return (
+        _touches(row, row.get("Lower Band #1"))
+        and _touches(row, row.get("VWAP"))
+        and _touches(row, row.get("Upper Band #1"))
+    )
+
+
+def _between(value, low, high):
+    return float(low) <= float(value) <= float(high)
+
+
+def _idea_level(row, key):
+    if key in ("middle", "vwap"):
+        return row.get("VWAP")
+    if key in ("upper", "upper_band_1"):
+        return row.get("Upper Band #1")
+    if key in ("lower", "lower_band_1"):
+        return row.get("Lower Band #1")
+    return None
+
+
+def _idea_pattern_candle_number(rule):
+    """Return which 30m candle the pattern belongs to: 1,2,3,4..."""
+    if rule in (None, "", "none", "after_first_close"):
+        return 1
+
+    rule = str(rule)
+
+    if rule.startswith("candle_"):
+        try:
+            return int(rule.split("_")[1])
+        except Exception:
+            return 1
+
+    # Backward compatibility for old stored labels/rules
+    if rule.startswith("first_"):
+        return 1
+
+    return 2
+
+
+def _idea_entry_anchor_time(pattern_rule, day_30m):
+    n = _idea_pattern_candle_number(pattern_rule)
+
+    if n < 1 or len(day_30m) < n:
+        return None, f"After {n} 30m candle close", n, None
+
+    candle = day_30m.iloc[n - 1]
+    return (
+        candle["datetime"] + pd.Timedelta(minutes=30),
+        f"After {n} 30m candle close",
+        n,
+        candle,
+    )
+
+
+def _idea_normalize_pattern_rule(rule):
+    """Support old rule names while allowing new builder rules."""
+    old_map = {
+        "none": "none",
+        "after_first_close": "after_first_close",
+        "second_close_below_upper": "candle_2_close_below_upper",
+        "second_close_above_upper": "candle_2_close_above_upper",
+        "second_close_below_lower": "candle_2_close_below_lower",
+        "second_close_above_lower": "candle_2_close_above_lower",
+        "touch_all3_close_below_lower": "candle_2_touch_all3_close_below_lower",
+        "touch_all3_close_above_upper": "candle_2_touch_all3_close_above_upper",
+        "touch_first_high_close_below": "candle_2_touch_first_high_close_below",
+        "close_above_first_high": "candle_2_close_above_first_high",
+        "touch_first_low_close_above": "candle_2_touch_first_low_close_above",
+        "close_below_first_low": "candle_2_close_below_first_low",
+        "open_mid_upper_close_below_lower": "candle_2_open_between_middle_upper_close_below_lower",
+        "open_lower_mid_close_above_upper": "candle_2_open_between_lower_middle_close_above_upper",
+        "first_open_above_upper_close_below_lower": "candle_1_open_above_upper_close_below_lower",
+        "first_open_below_lower_close_above_upper": "candle_1_open_below_lower_close_above_upper",
+    }
+    return old_map.get(str(rule), str(rule))
+
+
+def _idea_pattern_match(rule, day_30m):
+    """
+    New pattern engine.
+
+    Rule format from UI:
+    - after_first_close
+    - candle_2_close_above_upper
+    - candle_3_touch_middle_close_below
+    - candle_4_open_between_middle_upper_close_below_lower
+    """
+    rule = _idea_normalize_pattern_rule(rule)
+
+    if rule in ("none", "after_first_close"):
+        return True
+
+    if not rule.startswith("candle_"):
+        return False
+
+    parts = rule.split("_")
+
+    try:
+        n = int(parts[1])
+    except Exception:
+        return False
+
+    if n < 1 or len(day_30m) < n:
+        return False
+
+    first = day_30m.iloc[0]
+    c = day_30m.iloc[n - 1]
+    action = "_".join(parts[2:])
+
+    co = float(c["open"])
+    ch = float(c["high"])
+    cl = float(c["low"])
+    cc = float(c["close"])
+
+    fh = float(first["high"])
+    fl = float(first["low"])
+
+    if action in ("any", "no_filter"):
+        return True
+
+    # close_above_upper / close_below_middle / etc.
+    if action.startswith("close_above_"):
+        key = action.replace("close_above_", "", 1)
+        if key == "first_high":
+            return cc > fh
+        lvl = _idea_level(c, key)
+        return False if pd.isna(lvl) else cc > float(lvl)
+
+    if action.startswith("close_below_"):
+        key = action.replace("close_below_", "", 1)
+        if key == "first_low":
+            return cc < fl
+        lvl = _idea_level(c, key)
+        return False if pd.isna(lvl) else cc < float(lvl)
+
+    # touch_upper_close_above / touch_middle_close_below / etc.
+    if action.startswith("touch_") and "_close_above" in action:
+        key = action.replace("touch_", "", 1).replace("_close_above", "")
+        if key == "first_low":
+            return cl <= fl and cc > fl
+        lvl = _idea_level(c, key)
+        return False if pd.isna(lvl) else _touches(c, lvl) and cc > float(lvl)
+
+    if action.startswith("touch_") and "_close_below" in action:
+        key = action.replace("touch_", "", 1).replace("_close_below", "")
+        if key == "first_high":
+            return ch >= fh and cc < fh
+        lvl = _idea_level(c, key)
+        return False if pd.isna(lvl) else _touches(c, lvl) and cc < float(lvl)
+
+    if action == "touch_all3_close_above_upper":
+        upper = c.get("Upper Band #1")
+        return _touches_all_3_vwap(c) and not pd.isna(upper) and cc > float(upper)
+
+    if action == "touch_all3_close_below_lower":
+        lower = c.get("Lower Band #1")
+        return _touches_all_3_vwap(c) and not pd.isna(lower) and cc < float(lower)
+
+    if action == "open_between_middle_upper_close_below_lower":
+        mid = c.get("VWAP")
+        upper = c.get("Upper Band #1")
+        lower = c.get("Lower Band #1")
+        return (
+            not pd.isna(mid)
+            and not pd.isna(upper)
+            and not pd.isna(lower)
+            and _between(co, float(mid), float(upper))
+            and cc < float(lower)
+        )
+
+    if action == "open_between_lower_middle_close_above_upper":
+        lower = c.get("Lower Band #1")
+        mid = c.get("VWAP")
+        upper = c.get("Upper Band #1")
+        return (
+            not pd.isna(lower)
+            and not pd.isna(mid)
+            and not pd.isna(upper)
+            and _between(co, float(lower), float(mid))
+            and cc > float(upper)
+        )
+
+    if action == "open_above_upper_close_below_lower":
+        upper = c.get("Upper Band #1")
+        lower = c.get("Lower Band #1")
+        return (
+            not pd.isna(upper)
+            and not pd.isna(lower)
+            and co > float(upper)
+            and cc < float(lower)
+        )
+
+    if action == "open_below_lower_close_above_upper":
+        lower = c.get("Lower Band #1")
+        upper = c.get("Upper Band #1")
+        return (
+            not pd.isna(lower)
+            and not pd.isna(upper)
+            and co < float(lower)
+            and cc > float(upper)
+        )
+
+    return False
+
+
+def _add_30m_vwap_to_5m(day_5m, day_vwap):
+    """
+    Keep real 5m VWAP columns from NSE_NIFTY, 5.xlsx as:
+        VWAP, Upper Band #1, Lower Band #1
+
+    Also add 30m VWAP columns onto 5m rows as:
+        VWAP_30m, Upper Band #1_30m, Lower Band #1_30m
+    """
+    five = day_5m.sort_values("datetime").copy()
+
+    thirty = (
+        day_vwap[
+            ["datetime", "VWAP", "Upper Band #1", "Lower Band #1"]
+        ]
+        .sort_values("datetime")
+        .rename(columns={
+            "VWAP": "VWAP_30m",
+            "Upper Band #1": "Upper Band #1_30m",
+            "Lower Band #1": "Lower Band #1_30m",
+        })
+    )
+
+    return pd.merge_asof(
+        five,
+        thirty,
+        on="datetime",
+        direction="backward",
+    )
+
+
+def _merge_30m_nifty_vwap(day_nifty, day_vwap):
+    """30m exit rows with NIFTY signal/levels + VWAP bands on the same candle rows."""
+    vwap_cols = [
+        "datetime",
+        "VWAP",
+        "Upper Band #1",
+        "Lower Band #1",
+        "RSI",
+        "RSI-based MA",
+    ]
+    return pd.merge_asof(
+        day_nifty.sort_values("datetime"),
+        day_vwap[vwap_cols].sort_values("datetime"),
+        on="datetime",
+        direction="backward",
+    )
+
+
+def _valid_sl_side(entry, level, direction):
+    if level is None or pd.isna(level):
+        return False
+
+    entry = float(entry)
+    level = float(level)
+
+    if direction == "long":
+        return level < entry
+
+    return level > entry
+
+
+def _idea_add_patterns(df):
+    """Add Shooting/Box to Idea Lab NIFTY rows using the same fast daily annotation."""
+    records = df.to_dict("records")
+    spans = _compute_day_spans(records)
+    _annotate_shooting_box(records, spans)
+    return pd.DataFrame(records)
+
+
+def _idea_pattern_index(pattern_candle_rule):
+    if pattern_candle_rule == "after_first_close":
+        return 1
+
+    if pattern_candle_rule.startswith("candle_"):
+        try:
+            return int(pattern_candle_rule.split("_")[1]) - 1
+        except Exception:
+            return 0
+
+    return 0
+
+
+def _idea_search_start_time(pattern_candle_rule, day_30m):
+    """
+    For simple later-entry tests:
+    After 1st 30m close = start searching from candle 2 start time.
+    Since timestamps are candle START times, first close = first datetime + 30m.
+    """
+    if len(day_30m) == 0:
+        return None
+
+    if pattern_candle_rule == "after_first_close":
+        return day_30m.iloc[0]["datetime"] + pd.Timedelta(minutes=30)
+
+    if str(pattern_candle_rule).startswith("candle_"):
+        try:
+            n = int(str(pattern_candle_rule).split("_")[1])
+        except Exception:
+            n = 1
+
+        if len(day_30m) < n:
+            return None
+
+        return day_30m.iloc[n - 1]["datetime"] + pd.Timedelta(minutes=30)
+
+    return day_30m.iloc[0]["datetime"] + pd.Timedelta(minutes=30)
+
+
+def _idea_candle_number_from_time(day_30m, bar_time):
+    m = day_30m.index[day_30m["datetime"].eq(bar_time)]
+    if len(m):
+        return int(m[0]) + 1
+    return None
+
+
+def _idea_vwap_level(row, level_col):
+    return float(row[level_col])
+
+
+def _find_later_30m_pattern(day_30m, pattern_action, level_col):
+    day = day_30m.sort_values("datetime").reset_index(drop=True)
+
+    if len(day) < 2:
+        return None
+
+    # first 30m candle starts 09:15 and closes 09:45
+    first_close_time = day.loc[0, "datetime"] + pd.Timedelta(minutes=30)
+
+    # search only after first 30m candle closes
+    search = day[day["datetime"] >= first_close_time].copy()
+
+    prev = None
+
+    for _, r in search.iterrows():
+        close = float(r["close"])
+        high = float(r["high"])
+        low = float(r["low"])
+
+        hit = False
+        level_price = None
+
+        if "vwap" in pattern_action:
+            level_price = float(r[level_col])
+
+            if pattern_action == "later_30m_close_above_vwap":
+                hit = close > level_price
+
+            elif pattern_action == "later_30m_close_below_vwap":
+                hit = close < level_price
+
+            elif pattern_action == "later_30m_touch_vwap_close_above":
+                hit = low <= level_price <= high and close > level_price
+
+            elif pattern_action == "later_30m_touch_vwap_close_below":
+                hit = low <= level_price <= high and close < level_price
+
+        elif "rsi" in pattern_action:
+            rsi = float(r["RSI"])
+            rsi_ma = float(r["RSI-based MA"])
+
+            if pattern_action == "later_30m_rsi_above_ma":
+                hit = rsi > rsi_ma
+
+            elif pattern_action == "later_30m_rsi_below_ma":
+                hit = rsi < rsi_ma
+
+            elif pattern_action == "later_30m_rsi_cross_above_ma":
+                if prev is not None:
+                    hit = (
+                        float(prev["RSI"]) <= float(prev["RSI-based MA"])
+                        and rsi > rsi_ma
+                    )
+
+            elif pattern_action == "later_30m_rsi_cross_below_ma":
+                if prev is not None:
+                    hit = (
+                        float(prev["RSI"]) >= float(prev["RSI-based MA"])
+                        and rsi < rsi_ma
+                    )
+
+        if hit:
+            entry_bar_time = r["datetime"]
+
+            return {
+                "entry": close,
+                "entry_bar_time": entry_bar_time,
+                "entry_time": entry_bar_time + pd.Timedelta(minutes=30),
+
+                # IMPORTANT: actual later candle that triggered the rule
+                "pattern_candle": r,
+                "pattern_candle_number": int(r.name) + 1,
+
+                "pattern_action": pattern_action,
+                "pattern_level": level_col if "vwap" in pattern_action else "RSI / RSI-based MA",
+                "pattern_level_price": level_price,
+                "rsi": float(r["RSI"]) if "RSI" in r else None,
+                "rsi_ma": float(r["RSI-based MA"]) if "RSI-based MA" in r else None,
+            }
+
+        prev = r
+
+    return None
+
+
+def _idea_pattern_match_builder(pattern_action, vwap_level_col, first, pattern_candle):
+    if pattern_action == "none":
+        return True
+
+    pc_open = float(pattern_candle["open"])
+    pc_high = float(pattern_candle["high"])
+    pc_low = float(pattern_candle["low"])
+    pc_close = float(pattern_candle["close"])
+
+    first_high = float(first["high"])
+    first_low = float(first["low"])
+
+    mid = float(pattern_candle["VWAP"])
+    upper = float(pattern_candle["Upper Band #1"])
+    lower = float(pattern_candle["Lower Band #1"])
+    selected_level = _idea_vwap_level(pattern_candle, vwap_level_col)
+
+    if pattern_action == "close_above_vwap":
+        return pc_close > selected_level
+
+    if pattern_action == "close_below_vwap":
+        return pc_close < selected_level
+
+    if pattern_action == "touch_vwap_close_above":
+        return pc_low <= selected_level <= pc_high and pc_close > selected_level
+
+    if pattern_action == "touch_vwap_close_below":
+        return pc_low <= selected_level <= pc_high and pc_close < selected_level
+
+    if pattern_action == "touch_all3_close_above_upper":
+        return _touches_all_3_vwap(pattern_candle) and pc_close > upper
+
+    if pattern_action == "touch_all3_close_below_lower":
+        return _touches_all_3_vwap(pattern_candle) and pc_close < lower
+
+    if pattern_action == "open_mid_upper_close_below_lower":
+        return _between(pc_open, mid, upper) and pc_close < lower
+
+    if pattern_action == "open_lower_mid_close_above_upper":
+        return _between(pc_open, lower, mid) and pc_close > upper
+
+    if pattern_action == "touch_first_high_close_below":
+        return pc_high >= first_high and pc_close < first_high
+
+    if pattern_action == "touch_first_high_and_close_below_vwap":
+        return (
+            pc_high >= first_high
+            and pc_close < selected_level
+        )
+
+    if pattern_action == "close_above_first_high":
+        return pc_close > first_high
+
+    if pattern_action == "touch_first_low_close_above":
+        return pc_low <= first_low and pc_close > first_low
+
+    if pattern_action == "touch_first_low_and_close_above_vwap":
+        return (
+            pc_low <= first_low
+            and pc_close > selected_level
+        )
+
+    if pattern_action == "close_below_first_low":
+        return pc_close < first_low
+
+    if pattern_action == "open_above_upper_close_below_lower":
+        return pc_open > upper and pc_close < lower
+
+    if pattern_action == "open_below_lower_close_above_upper":
+        return pc_open < lower and pc_close > upper
+
+    return False
+
+
+def _idea_find_entry(
+    entry_rule,
+    day_30m,
+    day_5m_vwap,
+    after_time,
+    first,
+    second,
+    pattern_candle,
+    pattern_vwap_level,
+    entry_vwap_source="30m",
+):
+    # entry_bar_time = candle timestamp in data (START for 5m, 30m open for 30m entries).
+    # entry_time = actual entry at candle close (+5m or +30m).
+
+    if entry_rule == "pattern_close":
+        entry_bar_time = pattern_candle["datetime"]
+        entry_time = pattern_candle["datetime"] + pd.Timedelta(minutes=30)
+
+        return (
+            entry_time,
+            entry_bar_time,
+            float(pattern_candle["close"]),
+            "Entry at pattern candle close",
+        )
+
+    # 30m timestamps are candle START times; entry is at 30m close (+30 min).
+    if entry_rule.startswith("later_30m"):
+        rows_30m = day_30m[day_30m["datetime"] >= after_time].copy()
+
+        prev = None
+
+        for _, r in rows_30m.iterrows():
+            close = float(r["close"])
+            high = float(r["high"])
+            low = float(r["low"])
+
+            entry_bar_time = r["datetime"]
+            entry_time = entry_bar_time + pd.Timedelta(minutes=30)
+
+            hit = False
+
+            if "vwap" in entry_rule:
+                level = float(r[pattern_vwap_level])
+
+                if entry_rule == "later_30m_close_above_vwap":
+                    hit = close > level
+
+                elif entry_rule == "later_30m_close_below_vwap":
+                    hit = close < level
+
+                elif entry_rule == "later_30m_touch_vwap_close_above":
+                    hit = low <= level <= high and close > level
+
+                elif entry_rule == "later_30m_touch_vwap_close_below":
+                    hit = low <= level <= high and close < level
+
+                if hit:
+                    return (
+                        entry_time,
+                        entry_bar_time,
+                        close,
+                        f"30m entry: {entry_rule} at {pattern_vwap_level}",
+                    )
+
+            elif "rsi" in entry_rule:
+                rsi = float(r["RSI"])
+                rsi_ma = float(r["RSI-based MA"])
+
+                if entry_rule == "later_30m_rsi_above_ma":
+                    hit = rsi > rsi_ma
+
+                elif entry_rule == "later_30m_rsi_below_ma":
+                    hit = rsi < rsi_ma
+
+                elif entry_rule == "later_30m_rsi_cross_above_ma" and prev is not None:
+                    hit = (
+                        float(prev["RSI"]) <= float(prev["RSI-based MA"])
+                        and rsi > rsi_ma
+                    )
+
+                elif entry_rule == "later_30m_rsi_cross_below_ma" and prev is not None:
+                    hit = (
+                        float(prev["RSI"]) >= float(prev["RSI-based MA"])
+                        and rsi < rsi_ma
+                    )
+
+                if hit:
+                    return (
+                        entry_time,
+                        entry_bar_time,
+                        close,
+                        f"30m entry: {entry_rule}",
+                    )
+
+            prev = r
+
+        return None, None, None, "No entry"
+
+    # 5m timestamps are candle START times; entry is at the 5m close (+5 min).
+    if entry_rule.startswith("later_5m"):
+        rows = day_5m_vwap[day_5m_vwap["datetime"] >= after_time].copy()
+
+        for _, r in rows.iterrows():
+            close = float(r["close"])
+            high = float(r["high"])
+            low = float(r["low"])
+
+            entry_bar_time = r["datetime"]
+            entry_time = entry_bar_time + pd.Timedelta(minutes=5)
+
+            # Source choice:
+            # 5m = use real VWAP columns from NSE_NIFTY, 5.xlsx
+            # 30m = use 30m VWAP columns merged onto 5m rows
+            if entry_vwap_source == "30m":
+                level_col = f"{pattern_vwap_level}_30m"
+            else:
+                level_col = pattern_vwap_level
+
+            # Backward compatibility for old middle-only rules
+            if entry_rule in [
+                "later_5m_close_above_middle",
+                "later_5m_close_below_middle",
+            ]:
+                level_col = "VWAP_30m" if entry_vwap_source == "30m" else "VWAP"
+
+            if level_col not in r.index or pd.isna(r[level_col]):
+                continue
+
+            level = float(r[level_col])
+
+            hit = False
+
+            if entry_rule in [
+                "later_5m_close_above_middle",
+                "later_5m_close_above_vwap",
+            ]:
+                hit = close > level
+
+            elif entry_rule in [
+                "later_5m_close_below_middle",
+                "later_5m_close_below_vwap",
+            ]:
+                hit = close < level
+
+            elif entry_rule == "later_5m_touch_vwap_close_above":
+                hit = low <= level <= high and close > level
+
+            elif entry_rule == "later_5m_touch_vwap_close_below":
+                hit = low <= level <= high and close < level
+
+            if hit:
+                return (
+                    entry_time,
+                    entry_bar_time,
+                    close,
+                    f"5m entry using {entry_vwap_source} VWAP | level_col={level_col} | level={level:.2f} | rule={entry_rule}",
+                )
+
+        return None, None, None, "No 5m entry"
+
+    return None, None, None, "No entry"
+
+
+def _idea_exit_hit(exit_rule, row, prev, state, direction, first, second, i, entry_index):
+    close = float(row["close"])
+    entry = float(state["entry"])
+
+    # =========================
+    # VWAP SL EXITS
+    # =========================
+    if exit_rule.endswith("middle"):
+        mid = row.get("VWAP")
+        if not _valid_sl_side(entry, mid, direction):
+            return False, None, None
+
+        mid = float(mid)
+        if direction == "long" and close < mid:
+            return True, close, "Close Below Middle VWAP"
+        if direction == "short" and close > mid:
+            return True, close, "Close Above Middle VWAP"
+
+    if exit_rule.endswith("second_hilo"):
+        if direction == "long":
+            lvl = float(second["low"])
+            if _valid_sl_side(entry, lvl, direction) and close < lvl:
+                return True, close, "Close Below 2nd Candle Low"
+        else:
+            lvl = float(second["high"])
+            if _valid_sl_side(entry, lvl, direction) and close > lvl:
+                return True, close, "Close Above 2nd Candle High"
+
+    if exit_rule.endswith("first_hilo"):
+        if direction == "long":
+            lvl = float(first["low"])
+            if _valid_sl_side(entry, lvl, direction) and close < lvl:
+                return True, close, "Close Below 1st Candle Low"
+        else:
+            lvl = float(first["high"])
+            if _valid_sl_side(entry, lvl, direction) and close > lvl:
+                return True, close, "Close Above 1st Candle High"
+
+    if exit_rule.endswith("first_mid"):
+        lvl = (float(first["high"]) + float(first["low"])) / 2
+        if not _valid_sl_side(entry, lvl, direction):
+            return False, None, None
+
+        if direction == "long" and close < lvl:
+            return True, close, "Close Below 1st Candle Mid"
+        if direction == "short" and close > lvl:
+            return True, close, "Close Above 1st Candle Mid"
+
+    # =========================
+    # SAME SL EXITS AS UPPER SECTION
+    # =========================
+    if exit_rule == "hard_yhigh":
+        if not _valid_sl_side(entry, state.get("yHigh"), direction):
+            return False, None, None
+        return exit_hard_yhigh(row, state, direction)
+
+    if exit_rule == "hard_ylow":
+        if not _valid_sl_side(entry, state.get("yLow"), direction):
+            return False, None, None
+        return exit_hard_ylow(row, state, direction)
+
+    if exit_rule == "hard_ymid":
+        if not _valid_sl_side(entry, state.get("yMid"), direction):
+            return False, None, None
+        return exit_hard_ymid(row, state, direction)
+
+    if exit_rule == "conditional_ymid":
+        if not _valid_sl_side(entry, state.get("yMid"), direction):
+            return False, None, None
+        return exit_conditional_ymid(row, state, direction)
+
+    if exit_rule == "hard_yclose":
+        if not _valid_sl_side(entry, state.get("yClose"), direction):
+            return False, None, None
+        return exit_hard_yclose(row, state, direction)
+
+    if exit_rule == "touch_yhigh":
+        if not _valid_sl_side(entry, state.get("yHigh"), direction):
+            return False, None, None
+        return exit_touch_yhigh(row, state, direction)
+
+    if exit_rule == "hard_first_low":
+        if not _valid_sl_side(entry, state.get("first_low"), direction):
+            return False, None, None
+        return exit_hard_first_low(row, state, direction)
+
+    if exit_rule == "hard_first_high":
+        if not _valid_sl_side(entry, state.get("first_high"), direction):
+            return False, None, None
+        return exit_hard_first_high(row, state, direction)
+
+    if exit_rule == "weakness":
+        if prev is None:
+            return False, None, None
+        return exit_weakness(row, prev, state, direction)
+
+    if exit_rule == "strength":
+        if prev is None:
+            return False, None, None
+        return exit_strength(row, prev, state, direction)
+
+    if exit_rule.startswith("fib_touch_"):
+        try:
+            level = float(exit_rule.split("_")[2])
+            fib = _fib_price(state, level)
+        except Exception:
+            return False, None, None
+        if not _valid_sl_side(entry, fib, direction):
+            return False, None, None
+        return exit_fib_touch(row, state, direction, level)
+
+    if exit_rule.startswith("fib_close_"):
+        try:
+            level = float(exit_rule.split("_")[2])
+            fib = _fib_price(state, level)
+        except Exception:
+            return False, None, None
+        if not _valid_sl_side(entry, fib, direction):
+            return False, None, None
+        return exit_fib_close(row, state, direction, level)
+
+    if exit_rule == "benchmark":
+        return exit_benchmark(row, state, direction)
+
+    if exit_rule == "ema":
+        if "ema100" not in row or pd.isna(row.get("ema100")):
+            return False, None, None
+        return exit_ema(row, prev, state, direction)
+
+    if exit_rule == "ema_signal_hard":
+        if "ema100" not in row or pd.isna(row.get("ema100")):
+            return False, None, None
+        return exit_ema_signal_hard(row, state, direction)
+
+    if exit_rule == "shooting":
+        if prev is None:
+            return False, None, None
+        return exit_shooting(row, prev, state, direction)
+
+    if exit_rule == "box":
+        if prev is None:
+            return False, None, None
+        return exit_box(row, prev, state, direction)
+
+    if exit_rule == "fake_break_2nd":
+        return exit_fake_break_2nd(row, state, direction, i, entry_index)
+
+    return False, None, None
+
+
+def _idea_run_exit(
+    exit_df,
+    entry_time,
+    entry,
+    direction,
+    first,
+    second,
+    exit_rule,
+    params,
+    exit_timeframe="30m",
+):
+    exit_df = exit_df.sort_values("datetime").reset_index(drop=True)
+    bar_minutes = 5 if exit_timeframe == "5m" else 30
+    rows = exit_df[exit_df["datetime"] >= entry_time]
+
+    exit_price = None
+    exit_time = exit_df.iloc[-1]["datetime"]
+    exit_reason = "EOD"
+
+    max_mfe = 0.0
+    partial_done = False
+    partial_profit = 0.0
+
+    partial_thr = float(params.get("partial", 0.20))
+    lock_thr = float(params.get("lock", 0.25))
+    trail_thr = float(params.get("trail", 0.20))
+
+    before_entry = exit_df[exit_df["datetime"] < entry_time]
+    entry_index = int(before_entry.index.max()) if len(before_entry) else 0
+
+    state = {
+        "entry": float(entry),
+        "yHigh": first.get("yHigh"),
+        "yLow": first.get("yLow"),
+        "yMid": first.get("yMid"),
+        "yClose": first.get("yClose"),
+        "first_low": first.get("low"),
+        "first_high": first.get("high"),
+        "ema100": first.get("ema100"),
+        "direction": direction,
+        "signal": first.get("Signal"),
+        "tested_levels": {},
+    }
+
+    if entry_index + 1 < len(exit_df):
+        state["second_candle"] = dict(exit_df.iloc[entry_index + 1])
+    else:
+        state["second_candle"] = None
+
+    # Same first-candle level prefilter as upper/main backtest
+    levels = {
+        "yHigh": state["yHigh"],
+        "yLow": state["yLow"],
+        "yMid": state["yMid"],
+        "yClose": state["yClose"],
+    }
+
+    for name, lvl in levels.items():
+        if lvl is None or pd.isna(lvl):
+            continue
+
+        if direction == "long":
+            if float(first["close"]) > float(lvl):
+                state["tested_levels"][name] = "accepted"
+        else:
+            if float(first["close"]) < float(lvl):
+                state["tested_levels"][name] = "accepted"
+
+    for i, r in rows.iterrows():
+        close = float(r["close"])
+        prev = exit_df.iloc[i - 1] if i > 0 else None
+
+        if direction == "long":
+            pnl_now = close - entry
+            mfe_now = float(r["high"]) - entry
+        else:
+            pnl_now = entry - close
+            mfe_now = entry - float(r["low"])
+
+        max_mfe = max(max_mfe, mfe_now)
+
+        # Selected exit rule is structural SL only
+        hit, hit_price, reason = _idea_exit_hit(
+            exit_rule,
+            r,
+            prev,
+            state,
+            direction,
+            first,
+            second,
+            i,
+            entry_index,
+        )
+
+        if hit:
+            exit_price = hit_price if hit_price is not None else close
+            exit_time = r["datetime"] + pd.Timedelta(minutes=bar_minutes)
+            exit_reason = reason
+            break
+
+        # Profit management is always MFE-based
+        if not partial_done and max_mfe >= _entry_scaled(entry, partial_thr):
+            partial_done = True
+            partial_profit = _entry_scaled(entry, partial_thr)
+
+        if max_mfe >= _entry_scaled(entry, lock_thr):
+            giveback = max_mfe - pnl_now
+            if giveback >= _entry_scaled(entry, trail_thr):
+                exit_price = close
+                exit_time = r["datetime"] + pd.Timedelta(minutes=bar_minutes)
+                exit_reason = "MFE Trail Exit"
+                break
+
+    if exit_price is None:
+        exit_price = float(exit_df.iloc[-1]["close"])
+
+    raw = exit_price - entry if direction == "long" else entry - exit_price
+    pnl = partial_profit + raw if partial_done else 2 * raw
+
+    return {
+        "exit_time": exit_time,
+        "exit_timeframe": exit_timeframe,
+        "exit": round(exit_price, 2),
+        "pnl": round(float(pnl), 2),
+        "max_mfe_points": round(float(max_mfe), 2),
+        "partial_done": partial_done,
+        "exit_reason": exit_reason,
+    }
+
+
+def _idea_rsi_filter_match(first, rsi_filter):
+    if not rsi_filter or not rsi_filter.get("enabled", False):
+        return True, "RSI filter off"
+
+    if "RSI" not in first or pd.isna(first.get("RSI")):
+        return False, "First 30m RSI missing"
+
+    rsi = float(first["RSI"])
+    op = rsi_filter.get("operator", "RSI >")
+    value = float(rsi_filter.get("value", 70))
+    value2 = float(rsi_filter.get("value2", 30))
+
+    rsi_ma = None
+    if "RSI-based MA" in first and not pd.isna(first.get("RSI-based MA")):
+        rsi_ma = float(first["RSI-based MA"])
+
+    if op == "RSI >":
+        ok = rsi > value
+        return ok, f"First RSI {rsi:.2f} > {value:.2f}"
+
+    if op == "RSI >=":
+        ok = rsi >= value
+        return ok, f"First RSI {rsi:.2f} >= {value:.2f}"
+
+    if op == "RSI <":
+        ok = rsi < value
+        return ok, f"First RSI {rsi:.2f} < {value:.2f}"
+
+    if op == "RSI <=":
+        ok = rsi <= value
+        return ok, f"First RSI {rsi:.2f} <= {value:.2f}"
+
+    if op == "RSI between":
+        lo = min(value, value2)
+        hi = max(value, value2)
+        ok = lo <= rsi <= hi
+        return ok, f"First RSI {rsi:.2f} between {lo:.2f}-{hi:.2f}"
+
+    if op == "RSI outside":
+        lo = min(value, value2)
+        hi = max(value, value2)
+        ok = rsi < lo or rsi > hi
+        return ok, f"First RSI {rsi:.2f} outside {lo:.2f}-{hi:.2f}"
+
+    if op == "RSI > RSI-based MA":
+        if rsi_ma is None:
+            return False, "First RSI MA missing"
+        ok = rsi > rsi_ma
+        return ok, f"First RSI {rsi:.2f} > RSI MA {rsi_ma:.2f}"
+
+    if op == "RSI < RSI-based MA":
+        if rsi_ma is None:
+            return False, "First RSI MA missing"
+        ok = rsi < rsi_ma
+        return ok, f"First RSI {rsi:.2f} < RSI MA {rsi_ma:.2f}"
+
+    return True, "RSI filter off"
+
+
+def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
+    nifty = _idea_add_patterns(prepare_idea_df(nifty_df))
+    vwap = prepare_idea_df(vwap_df)
+    five = prepare_idea_df(five_min_df)
+
+    signal = config.get("signal")
+    candles = set(config.get("candles") or [])
+    direction = config.get("direction", "long")
+    pattern_candle_rule = config.get("pattern_candle_rule", "after_first_close")
+    pattern_action = config.get("pattern_action", "none")
+    pattern_vwap_level = config.get("pattern_vwap_level", "VWAP")
+
+    entry_rule = config.get("entry_rule", "pattern_close")
+    entry_vwap_source = config.get("entry_vwap_source", "30m")
+    exit_rule = config.get("exit_rule", "30m_middle")
+    exit_timeframe = "5m" if exit_rule.startswith("5m_") else "30m"
+    params = config.get("params", {})
+    rsi_filter = config.get("rsi_filter", {})
+
+    trades = []
+    missed = []
+    pattern_rows = []
+
+    for d, day_nifty in nifty.groupby("date"):
+        day_nifty = day_nifty.sort_values("datetime").reset_index(drop=True)
+        day_vwap = vwap[vwap["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
+        day_5m = five[five["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
+
+        if len(day_nifty) < 2 or len(day_vwap) < 2 or day_5m.empty:
+            continue
+
+        day_30m_exit = _merge_30m_nifty_vwap(day_nifty, day_vwap)
+
+        pattern_idx = _idea_pattern_index(pattern_candle_rule)
+
+        if len(day_30m_exit) <= pattern_idx:
+            continue
+
+        first = day_30m_exit.iloc[0]
+        second = day_30m_exit.iloc[1] if len(day_30m_exit) > 1 else first
+        pattern_candle = day_30m_exit.iloc[pattern_idx]
+
+        if signal and first.get("Signal") != signal:
+            continue
+        if candles and first.get("Candles") not in candles:
+            continue
+
+        rsi_ok, rsi_filter_reason = _idea_rsi_filter_match(first, rsi_filter)
+
+        if not rsi_ok:
+            continue
+
+        if pattern_action.startswith("later_30m"):
+            pattern_hit = _find_later_30m_pattern(
+                day_30m_exit,
+                pattern_action,
+                pattern_vwap_level,
+            )
+            pattern_match = pattern_hit is not None
+
+            # IMPORTANT:
+            # If later 30m condition hits, that later candle becomes the real pattern candle.
+            if pattern_match:
+                pattern_candle = pattern_hit["pattern_candle"]
+                pattern_idx = int(pattern_hit["pattern_candle_number"]) - 1
+
+        else:
+            pattern_hit = None
+            pattern_match = _idea_pattern_match_builder(
+                pattern_action,
+                pattern_vwap_level,
+                first,
+                pattern_candle,
+            )
+
+        if pattern_action == "none" and (
+            entry_rule.startswith("later_30m") or entry_rule.startswith("later_5m")
+        ):
+            entry_anchor_time = _idea_search_start_time(
+                pattern_candle_rule,
+                day_30m_exit,
+            )
+        else:
+            entry_anchor_time = pattern_candle["datetime"] + pd.Timedelta(minutes=30)
+
+        if entry_anchor_time is None:
+            continue
+
+        pattern_row = {
+            "date": d,
+            "nifty_signal": first.get("Signal"),
+            "nifty_candle": first.get("Candles"),
+            "direction": direction,
+
+            "pattern_candle_rule": pattern_candle_rule,
+            "pattern_action": pattern_action,
+            "pattern_vwap_level": pattern_vwap_level,
+            "pattern_candle_number": pattern_idx + 1,
+            "pattern_match": pattern_match,
+
+            "entry_rule": entry_rule,
+            "entry_vwap_source": entry_vwap_source,
+            "entry_anchor": f"After candle {pattern_idx + 1} close",
+            "entry_anchor_time": entry_anchor_time,
+
+            "exit_rule": exit_rule,
+
+            "first_high": float(first["high"]),
+            "first_low": float(first["low"]),
+            "first_close": float(first["close"]),
+            "first_rsi": float(first["RSI"]) if "RSI" in first and not pd.isna(first.get("RSI")) else None,
+            "first_rsi_ma": float(first["RSI-based MA"]) if "RSI-based MA" in first and not pd.isna(first.get("RSI-based MA")) else None,
+            "rsi_filter_reason": rsi_filter_reason,
+
+            "pattern_candle_start_time": pattern_candle["datetime"],
+            "pattern_candle_close_time": entry_anchor_time,
+            "pattern_open": float(pattern_candle["open"]),
+            "pattern_high": float(pattern_candle["high"]),
+            "pattern_low": float(pattern_candle["low"]),
+            "pattern_close": float(pattern_candle["close"]),
+            "pattern_vwap": float(pattern_candle["VWAP"]),
+            "pattern_upper_band_1": float(pattern_candle["Upper Band #1"]),
+            "pattern_lower_band_1": float(pattern_candle["Lower Band #1"]),
+        }
+
+        if pattern_hit is not None:
+            pattern_row.update({
+                "pattern_action_hit_time": pattern_hit["entry_time"],
+                "pattern_action_hit_bar_time": pattern_hit["entry_bar_time"],
+                "pattern_action_level": pattern_hit["pattern_level"],
+                "pattern_action_level_price": pattern_hit["pattern_level_price"],
+                "pattern_action_rsi": pattern_hit["rsi"],
+                "pattern_action_rsi_ma": pattern_hit["rsi_ma"],
+            })
+
+        pattern_rows.append(pattern_row)
+
+        if not pattern_match:
+            continue
+
+        day_5m_vwap = _add_30m_vwap_to_5m(day_5m, day_vwap)
+
+        entry_time, entry_bar_time, entry, entry_reason = _idea_find_entry(
+            entry_rule,
+            day_30m_exit,
+            day_5m_vwap,
+            entry_anchor_time,
+            first,
+            second,
+            pattern_candle,
+            pattern_vwap_level,
+            entry_vwap_source,
+        )
+
+        entry_candle_number = None
+
+        if entry_rule.startswith("later_30m"):
+            entry_candle_number = _idea_candle_number_from_time(
+                day_30m_exit,
+                entry_bar_time,
+            )
+        else:
+            entry_candle_number = pattern_idx + 1
+
+        if entry is None or entry_time is None or entry_bar_time is None:
+            missed.append({**pattern_row, "miss_reason": entry_reason})
+            continue
+
+        exit_df = day_5m_vwap if exit_timeframe == "5m" else day_30m_exit
+        result = _idea_run_exit(
+            exit_df,
+            entry_time,
+            float(entry),
+            direction,
+            first,
+            second,
+            exit_rule,
+            params,
+            exit_timeframe,
+        )
+
+        trades.append({
+            **pattern_row,
+
+            # table/debug timing
+            "entry_time": entry_time,                 # actual entry close time
+            "entry_bar_time": entry_bar_time,         # candle timestamp in data
+            "entry_exec_time": entry_time,            # alias for exit scan start
+            "exit_start_time": entry_time,            # exit scanning starts here
+
+            "entry": round(float(entry), 2),
+            "entry_candle_number": entry_candle_number,
+            "entry_reason": entry_reason,
+            "exit_timeframe": exit_timeframe,
+            **result,
+        })
+
+    return {
+        "trades": pd.DataFrame(trades),
+        "missed": pd.DataFrame(missed),
+        "pattern_check": pd.DataFrame(pattern_rows),
+    }
