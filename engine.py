@@ -1363,6 +1363,9 @@ IDEA_PATTERN_ACTION_RULES = {
     "Touch VWAP level and close above": "touch_vwap_close_above",
     "Touch VWAP level and close below": "touch_vwap_close_below",
 
+    "Touch first high AND close below VWAP level": "touch_first_high_close_below_vwap",
+    "Touch first low AND close above VWAP level": "touch_first_low_close_above_vwap",
+
     "Touch all 3 VWAP lines and close above Upper": "touch_all3_close_above_upper",
     "Touch all 3 VWAP lines and close below Lower": "touch_all3_close_below_lower",
 
@@ -1370,11 +1373,9 @@ IDEA_PATTERN_ACTION_RULES = {
     "Open between Lower/Middle and close above Upper": "open_lower_mid_close_above_upper",
 
     "Touch first high and close below": "touch_first_high_close_below",
-    "Touch first high AND close below VWAP level": "touch_first_high_and_close_below_vwap",
     "Close above first high": "close_above_first_high",
 
     "Touch first low and close above": "touch_first_low_close_above",
-    "Touch first low AND close above VWAP level": "touch_first_low_and_close_above_vwap",
     "Close below first low": "close_below_first_low",
 
     "Open above Upper and close below Lower": "open_above_upper_close_below_lower",
@@ -1392,6 +1393,7 @@ IDEA_PATTERN_ACTION_RULES = {
 }
 
 IDEA_VWAP_LEVEL_RULES = {
+    "None": None,
     "Middle VWAP": "VWAP",
     "Upper Band #1": "Upper Band #1",
     "Lower Band #1": "Lower Band #1",
@@ -1426,6 +1428,7 @@ IDEA_EXIT_RULES = {
     "VWAP 30m SL: close below/above Middle VWAP": "30m_middle",
     "VWAP 30m SL: close below 2nd low / above 2nd high": "30m_second_hilo",
     "VWAP 30m SL: close below 1st low / above 1st high": "30m_first_hilo",
+    "VWAP 30m SL: touch 1st high/low and close back inside VWAP": "30m_touch_first_hilo_inside_vwap",
     "VWAP 5m SL: close below/above Middle VWAP": "5m_middle",
     "VWAP 5m SL: close below 1st low / above 1st high": "5m_first_hilo",
     "VWAP 5m SL: close below/above 1st candle 50% mid": "5m_first_mid",
@@ -1867,8 +1870,29 @@ def _idea_candle_number_from_time(day_30m, bar_time):
     return None
 
 
-def _idea_vwap_level(row, level_col):
-    return float(row[level_col])
+def _idea_vwap_level(row, level_rule):
+    if level_rule is None:
+        return None
+
+    level_map = {
+        "None": None,
+        "Middle VWAP": "VWAP",
+        "VWAP": "VWAP",
+        "Upper Band #1": "Upper Band #1",
+        "Lower Band #1": "Lower Band #1",
+    }
+
+    col = level_map.get(str(level_rule).strip(), str(level_rule).strip())
+
+    if col is None or col not in row.index:
+        return None
+
+    val = pd.to_numeric(row.get(col), errors="coerce")
+
+    if pd.isna(val):
+        return None
+
+    return float(val)
 
 
 def _find_later_30m_pattern(day_30m, pattern_action, level_col):
@@ -1956,7 +1980,7 @@ def _find_later_30m_pattern(day_30m, pattern_action, level_col):
     return None
 
 
-def _idea_pattern_match_builder(pattern_action, vwap_level_col, first, pattern_candle):
+def _idea_pattern_match_builder(pattern_action, vwap_level_rule, first, pattern_candle):
     if pattern_action == "none":
         return True
 
@@ -1971,7 +1995,10 @@ def _idea_pattern_match_builder(pattern_action, vwap_level_col, first, pattern_c
     mid = float(pattern_candle["VWAP"])
     upper = float(pattern_candle["Upper Band #1"])
     lower = float(pattern_candle["Lower Band #1"])
-    selected_level = _idea_vwap_level(pattern_candle, vwap_level_col)
+    selected_level = _idea_vwap_level(pattern_candle, vwap_level_rule)
+
+    if selected_level is None:
+        return False
 
     if pattern_action == "close_above_vwap":
         return pc_close > selected_level
@@ -1984,6 +2011,12 @@ def _idea_pattern_match_builder(pattern_action, vwap_level_col, first, pattern_c
 
     if pattern_action == "touch_vwap_close_below":
         return pc_low <= selected_level <= pc_high and pc_close < selected_level
+
+    if pattern_action == "touch_first_high_close_below_vwap":
+        return pc_high >= first_high and pc_close < selected_level
+
+    if pattern_action == "touch_first_low_close_above_vwap":
+        return pc_low <= first_low and pc_close > selected_level
 
     if pattern_action == "touch_all3_close_above_upper":
         return _touches_all_3_vwap(pattern_candle) and pc_close > upper
@@ -2000,23 +2033,11 @@ def _idea_pattern_match_builder(pattern_action, vwap_level_col, first, pattern_c
     if pattern_action == "touch_first_high_close_below":
         return pc_high >= first_high and pc_close < first_high
 
-    if pattern_action == "touch_first_high_and_close_below_vwap":
-        return (
-            pc_high >= first_high
-            and pc_close < selected_level
-        )
-
     if pattern_action == "close_above_first_high":
         return pc_close > first_high
 
     if pattern_action == "touch_first_low_close_above":
         return pc_low <= first_low and pc_close > first_low
-
-    if pattern_action == "touch_first_low_and_close_above_vwap":
-        return (
-            pc_low <= first_low
-            and pc_close > selected_level
-        )
 
     if pattern_action == "close_below_first_low":
         return pc_close < first_low
@@ -2230,6 +2251,38 @@ def _idea_exit_hit(exit_rule, row, prev, state, direction, first, second, i, ent
             lvl = float(first["high"])
             if _valid_sl_side(entry, lvl, direction) and close > lvl:
                 return True, close, "Close Above 1st Candle High"
+
+    if exit_rule == "30m_touch_first_hilo_inside_vwap":
+        if i == 0:
+            return False, None, None
+
+        sl_high = float(row["high"])
+        sl_low = float(row["low"])
+        sl_close = close
+
+        first_high = float(first["high"])
+        first_low = float(first["low"])
+
+        upper_vwap = pd.to_numeric(row.get("Upper Band #1"), errors="coerce")
+        lower_vwap = pd.to_numeric(row.get("Lower Band #1"), errors="coerce")
+
+        if direction == "long":
+            if pd.notna(upper_vwap):
+                if (
+                    sl_high >= first_high
+                    and sl_close < first_high
+                    and sl_close < float(upper_vwap)
+                ):
+                    return True, sl_close, "Touch 1st high, close below 1st high and Upper VWAP"
+
+        if direction == "short":
+            if pd.notna(lower_vwap):
+                if (
+                    sl_low <= first_low
+                    and sl_close > first_low
+                    and sl_close > float(lower_vwap)
+                ):
+                    return True, sl_close, "Touch 1st low, close above 1st low and Lower VWAP"
 
     if exit_rule.endswith("first_mid"):
         lvl = (float(first["high"]) + float(first["low"])) / 2
@@ -2473,63 +2526,310 @@ def _idea_run_exit(
     }
 
 
-def _idea_rsi_filter_match(first, rsi_filter):
-    if not rsi_filter or not rsi_filter.get("enabled", False):
-        return True, "RSI filter off"
+def _idea_first_30m_rsi(day_30):
+    first_30m_rsi = None
 
-    if "RSI" not in first or pd.isna(first.get("RSI")):
-        return False, "First 30m RSI missing"
+    if day_30 is None or day_30.empty:
+        return first_30m_rsi
 
-    rsi = float(first["RSI"])
-    op = rsi_filter.get("operator", "RSI >")
-    value = float(rsi_filter.get("value", 70))
-    value2 = float(rsi_filter.get("value2", 30))
+    rsi_cols = [
+        c for c in day_30.columns
+        if str(c).strip().lower() in {"rsi", "rsi_14", "rsi14", "first_rsi", "first 30m rsi"}
+    ]
 
-    rsi_ma = None
-    if "RSI-based MA" in first and not pd.isna(first.get("RSI-based MA")):
-        rsi_ma = float(first["RSI-based MA"])
+    if rsi_cols:
+        first_30m_rsi = pd.to_numeric(day_30.iloc[0].get(rsi_cols[0]), errors="coerce")
+        if pd.isna(first_30m_rsi):
+            first_30m_rsi = None
+        else:
+            first_30m_rsi = float(first_30m_rsi)
 
-    if op == "RSI >":
-        ok = rsi > value
-        return ok, f"First RSI {rsi:.2f} > {value:.2f}"
+    return first_30m_rsi
 
-    if op == "RSI >=":
-        ok = rsi >= value
-        return ok, f"First RSI {rsi:.2f} >= {value:.2f}"
 
-    if op == "RSI <":
-        ok = rsi < value
-        return ok, f"First RSI {rsi:.2f} < {value:.2f}"
+def _calc_vwap_width_pct(row):
+    upper_col = None
+    lower_col = None
+    close_col = None
 
-    if op == "RSI <=":
-        ok = rsi <= value
-        return ok, f"First RSI {rsi:.2f} <= {value:.2f}"
+    for c in row.index:
+        name = str(c).strip().lower()
 
-    if op == "RSI between":
-        lo = min(value, value2)
-        hi = max(value, value2)
-        ok = lo <= rsi <= hi
-        return ok, f"First RSI {rsi:.2f} between {lo:.2f}-{hi:.2f}"
+        if name in {"upper band #1", "upper_band_1", "upper1", "vwap_upper", "upper band"}:
+            upper_col = c
 
-    if op == "RSI outside":
-        lo = min(value, value2)
-        hi = max(value, value2)
-        ok = rsi < lo or rsi > hi
-        return ok, f"First RSI {rsi:.2f} outside {lo:.2f}-{hi:.2f}"
+        if name in {"lower band #1", "lower_band_1", "lower1", "vwap_lower", "lower band"}:
+            lower_col = c
 
-    if op == "RSI > RSI-based MA":
-        if rsi_ma is None:
-            return False, "First RSI MA missing"
-        ok = rsi > rsi_ma
-        return ok, f"First RSI {rsi:.2f} > RSI MA {rsi_ma:.2f}"
+        if name in {"close", "Close".lower()}:
+            close_col = c
 
-    if op == "RSI < RSI-based MA":
-        if rsi_ma is None:
-            return False, "First RSI MA missing"
-        ok = rsi < rsi_ma
-        return ok, f"First RSI {rsi:.2f} < RSI MA {rsi_ma:.2f}"
+    if upper_col is None or lower_col is None or close_col is None:
+        return None
 
-    return True, "RSI filter off"
+    upper = pd.to_numeric(row.get(upper_col), errors="coerce")
+    lower = pd.to_numeric(row.get(lower_col), errors="coerce")
+    close = pd.to_numeric(row.get(close_col), errors="coerce")
+
+    if pd.isna(upper) or pd.isna(lower) or pd.isna(close) or close == 0:
+        return None
+
+    return round(((float(upper) - float(lower)) / float(close)) * 100, 3)
+
+
+def _safe_num_from_row(row, col):
+    if col not in row.index:
+        return None
+    val = pd.to_numeric(row.get(col), errors="coerce")
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
+def _vwap_width_pct_from_row(row):
+    upper = _safe_num_from_row(row, "Upper Band #1")
+    lower = _safe_num_from_row(row, "Lower Band #1")
+    close = _safe_num_from_row(row, "close")
+
+    if upper is None or lower is None or close in (None, 0):
+        return None
+
+    return round(((upper - lower) / close) * 100, 4)
+
+
+def _build_raw_30m_features(day_30, max_candles=6):
+    out = {}
+
+    if day_30 is None or day_30.empty:
+        return out
+
+    sort_col = "time" if "time" in day_30.columns else "datetime"
+    day_30 = day_30.sort_values(sort_col).reset_index(drop=True)
+
+    first = day_30.iloc[0]
+    first_high = _safe_num_from_row(first, "high")
+    first_low = _safe_num_from_row(first, "low")
+
+    for i in range(min(max_candles, len(day_30))):
+        c = day_30.iloc[i]
+        n = i + 1
+        p = f"C{n}"
+
+        high = _safe_num_from_row(c, "high")
+        low = _safe_num_from_row(c, "low")
+        open_ = _safe_num_from_row(c, "open")
+        close = _safe_num_from_row(c, "close")
+
+        upper = _safe_num_from_row(c, "Upper Band #1")
+        middle = _safe_num_from_row(c, "VWAP")
+        lower = _safe_num_from_row(c, "Lower Band #1")
+
+        rsi = None
+        for rsi_col in ["RSI", "rsi", "RSI_14", "rsi_14", "rsi14"]:
+            if rsi_col in c.index:
+                rsi = _safe_num_from_row(c, rsi_col)
+                break
+
+        out[f"{p}_Time"] = c.get("time") if "time" in c.index else c.get("datetime")
+        out[f"{p}_Open"] = open_
+        out[f"{p}_High"] = high
+        out[f"{p}_Low"] = low
+        out[f"{p}_Close"] = close
+
+        out[f"{p}_Color"] = (
+            "Green" if open_ is not None and close is not None and close > open_
+            else "Red" if open_ is not None and close is not None and close < open_
+            else "Doji"
+        )
+
+        out[f"{p}_RSI"] = rsi
+        out[f"{p}_Upper_VWAP"] = upper
+        out[f"{p}_Middle_VWAP"] = middle
+        out[f"{p}_Lower_VWAP"] = lower
+        out[f"{p}_VWAP_Width_%"] = _vwap_width_pct_from_row(c)
+
+        if first_high is not None and high is not None and close is not None:
+            out[f"{p}_Break_First_High"] = high >= first_high
+            out[f"{p}_Close_Above_First_High"] = close > first_high
+            out[f"{p}_Close_Below_First_High"] = close < first_high
+
+        if first_low is not None and low is not None and close is not None:
+            out[f"{p}_Break_First_Low"] = low <= first_low
+            out[f"{p}_Close_Above_First_Low"] = close > first_low
+            out[f"{p}_Close_Below_First_Low"] = close < first_low
+
+        if upper is not None and close is not None:
+            out[f"{p}_Close_Above_Upper_VWAP"] = close > upper
+            out[f"{p}_Close_Below_Upper_VWAP"] = close < upper
+
+        if middle is not None and close is not None:
+            out[f"{p}_Close_Above_Middle_VWAP"] = close > middle
+            out[f"{p}_Close_Below_Middle_VWAP"] = close < middle
+
+        if lower is not None and close is not None:
+            out[f"{p}_Close_Above_Lower_VWAP"] = close > lower
+            out[f"{p}_Close_Below_Lower_VWAP"] = close < lower
+
+    return out
+
+
+def run_simple_vwap_day_filter(
+    summary_df,
+    df_30,
+    signal,
+    direction,
+    candles,
+    pattern_type="2nd_touch_first_high_close_below_upper",
+):
+    results = []
+
+    if isinstance(candles, str):
+        candles = [candles]
+
+    s = summary_df.copy()
+    d30 = df_30.copy()
+
+    s["Date"] = pd.to_datetime(s["Date"], errors="coerce")
+    s["date"] = s["Date"].dt.date
+
+    d30["time"] = pd.to_datetime(d30["time"], errors="coerce")
+    d30["date"] = d30["time"].dt.date
+    d30 = d30.sort_values(["date", "time"])
+
+    # basic signal/candle/direction filter
+    s = s[s["Signal"].astype(str).str.strip().eq(signal)]
+
+    if "Direction" in s.columns:
+        s = s[s["Direction"].astype(str).str.strip().str.lower().eq(direction.lower())]
+    elif "Move.1" in s.columns:
+        s = s[s["Move.1"].astype(str).str.strip().str.lower().eq(direction.lower())]
+
+    s = s[s["Candles"].astype(str).str.strip().isin(candles)]
+
+    for _, row in s.iterrows():
+        day = row["date"]
+        day_30 = d30[d30["date"] == day].sort_values("time").reset_index(drop=True)
+
+        if len(day_30) < 2:
+            continue
+
+        first = day_30.iloc[0]
+        second = day_30.iloc[1]
+
+        first_high = float(first["high"])
+        second_high = float(second["high"])
+        second_close = float(second["close"])
+
+        upper_col = None
+        for c in day_30.columns:
+            if str(c).strip().lower() in {
+                "upper band #1",
+                "upper_band_1",
+                "upper1",
+                "vwap_upper",
+                "upper band"
+            }:
+                upper_col = c
+                break
+
+        if upper_col is None:
+            continue
+
+        upper_vwap = pd.to_numeric(second[upper_col], errors="coerce")
+
+        if pd.isna(upper_vwap):
+            continue
+
+        pattern_ok = (
+            second_high >= first_high
+            and second_close < float(upper_vwap)
+        )
+
+        if not pattern_ok:
+            continue
+
+        out = row.to_dict()
+        out.update({
+            "Pattern": "2nd 30m touched first high and closed below Upper VWAP",
+            "First_High": first_high,
+            "Second_High": second_high,
+            "Second_Close": second_close,
+            "Second_Upper_VWAP": float(upper_vwap),
+            "Pattern_Candle_Time": second["time"],
+        })
+
+        results.append(out)
+
+    return pd.DataFrame(results)
+
+
+def _idea_summary_with_dates(summary_df):
+    s = summary_df.copy()
+    s.columns = s.columns.str.strip()
+    if "date" not in s.columns:
+        if "Date" in s.columns:
+            s["date"] = pd.to_datetime(s["Date"], errors="coerce").dt.date
+        elif "time" in s.columns:
+            s["date"] = pd.to_datetime(s["time"], errors="coerce").dt.date
+        elif "datetime" in s.columns:
+            s["date"] = pd.to_datetime(s["datetime"], errors="coerce").dt.date
+        else:
+            s["date"] = pd.NaT
+    return s
+
+
+def _idea_part1_dates(summary_df, signal, candles, direction):
+    base_df = _idea_summary_with_dates(summary_df)
+
+    if signal:
+        base_df = base_df[
+            base_df["Signal"].astype(str).str.strip().eq(str(signal).strip())
+        ]
+
+    if candles:
+        candle_list = list(candles)
+        base_df = base_df[
+            base_df["Candles"].astype(str).str.strip().isin(candle_list)
+        ]
+
+    if direction and str(direction).strip().lower() not in {"", "any"}:
+        direction_col = "Direction" if "Direction" in base_df.columns else "Move.1"
+        if direction_col in base_df.columns:
+            base_df = base_df[
+                base_df[direction_col].astype(str).str.strip().str.lower()
+                .eq(str(direction).strip().lower())
+            ]
+
+    return set(base_df["date"].dropna().unique())
+
+
+def _idea_advanced_pattern_ok(day_30m_exit, pattern_action, pattern_vwap_level, pattern_candle_rule):
+    if len(day_30m_exit) < 2:
+        return False
+
+    if not pattern_action or pattern_action == "none":
+        return True
+
+    pattern_idx = _idea_pattern_index(pattern_candle_rule)
+    if len(day_30m_exit) <= pattern_idx:
+        return False
+
+    first = day_30m_exit.iloc[0]
+    pattern_candle = day_30m_exit.iloc[pattern_idx]
+
+    return _idea_pattern_match_builder(
+        pattern_action,
+        pattern_vwap_level,
+        first,
+        pattern_candle,
+    )
+
+
+def _idea_pattern_candle_label(pattern_candle_rule):
+    pattern_idx = _idea_pattern_index(pattern_candle_rule)
+    ordinal_map = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+    ordinal = ordinal_map.get(pattern_idx + 1, f"{pattern_idx + 1}th")
+    return f"{ordinal} 30m candle"
 
 
 def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
@@ -2538,87 +2838,196 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
     five = prepare_idea_df(five_min_df)
 
     signal = config.get("signal")
-    candles = set(config.get("candles") or [])
+    candles = config.get("candles") or []
+    if isinstance(candles, str):
+        candles = [candles]
+    else:
+        candles = list(candles)
+
     direction = config.get("direction", "long")
     pattern_candle_rule = config.get("pattern_candle_rule", "after_first_close")
     pattern_action = config.get("pattern_action", "none")
-    pattern_vwap_level = config.get("pattern_vwap_level", "VWAP")
+    vwap_level = config.get("vwap_level")
+    pattern_vwap_level = config.get("pattern_vwap_level")
 
     entry_rule = config.get("entry_rule", "pattern_close")
     entry_vwap_source = config.get("entry_vwap_source", "30m")
     exit_rule = config.get("exit_rule", "30m_middle")
     exit_timeframe = "5m" if exit_rule.startswith("5m_") else "30m"
     params = config.get("params", {})
-    rsi_filter = config.get("rsi_filter", {})
+    use_pattern_filter = config.get("use_pattern_filter", False)
+
+    part1_dates = _idea_part1_dates(nifty_df, signal, candles, direction)
+    part1_count = len(part1_dates)
+    passed_dates = set(part1_dates)
+
+    if use_pattern_filter and passed_dates:
+        filtered_dates = set()
+        for d in sorted(passed_dates):
+            day_nifty = nifty[nifty["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
+            day_vwap = vwap[vwap["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
+            if len(day_nifty) < 2 or len(day_vwap) < 2:
+                continue
+            day_30m_exit = _merge_30m_nifty_vwap(day_nifty, day_vwap)
+            if _idea_advanced_pattern_ok(
+                day_30m_exit,
+                pattern_action,
+                pattern_vwap_level,
+                pattern_candle_rule,
+            ):
+                filtered_dates.add(d)
+        passed_dates = filtered_dates
+
+    part2_count = len(passed_dates)
 
     trades = []
     missed = []
     pattern_rows = []
+    detailed_raw_rows = []
 
     for d, day_nifty in nifty.groupby("date"):
+        if d not in passed_dates:
+            continue
+
         day_nifty = day_nifty.sort_values("datetime").reset_index(drop=True)
         day_vwap = vwap[vwap["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
         day_5m = five[five["date"].eq(d)].sort_values("datetime").reset_index(drop=True)
 
+        vwap_width_pct_2nd = None
+        if len(day_vwap) >= 2:
+            second_30m = day_vwap.iloc[1]
+            vwap_width_pct_2nd = _calc_vwap_width_pct(second_30m)
+
         if len(day_nifty) < 2 or len(day_vwap) < 2 or day_5m.empty:
             continue
 
-        day_30m_exit = _merge_30m_nifty_vwap(day_nifty, day_vwap)
+        day_30 = _merge_30m_nifty_vwap(day_nifty, day_vwap).sort_values("datetime").reset_index(drop=True)
 
+        if len(day_30) < 2:
+            continue
+
+        first = day_30.iloc[0]
+        second = day_30.iloc[1]
         pattern_idx = _idea_pattern_index(pattern_candle_rule)
+        pattern_candle = day_30.iloc[pattern_idx] if len(day_30) > pattern_idx else first
+        first_30m_rsi = _idea_first_30m_rsi(day_vwap)
 
-        if len(day_30m_exit) <= pattern_idx:
-            continue
+        # Advanced pattern only filters the day (pass/fail); it does not move entry.
+        pattern_ok = True
+        advanced_filter_candle = None
+        advanced_filter_result = "Off"
 
-        first = day_30m_exit.iloc[0]
-        second = day_30m_exit.iloc[1] if len(day_30m_exit) > 1 else first
-        pattern_candle = day_30m_exit.iloc[pattern_idx]
-
-        if signal and first.get("Signal") != signal:
-            continue
-        if candles and first.get("Candles") not in candles:
-            continue
-
-        rsi_ok, rsi_filter_reason = _idea_rsi_filter_match(first, rsi_filter)
-
-        if not rsi_ok:
-            continue
-
-        if pattern_action.startswith("later_30m"):
-            pattern_hit = _find_later_30m_pattern(
-                day_30m_exit,
+        if use_pattern_filter:
+            advanced_filter_candle = _idea_pattern_candle_label(pattern_candle_rule)
+            pattern_ok = _idea_advanced_pattern_ok(
+                day_30,
                 pattern_action,
                 pattern_vwap_level,
-            )
-            pattern_match = pattern_hit is not None
-
-            # IMPORTANT:
-            # If later 30m condition hits, that later candle becomes the real pattern candle.
-            if pattern_match:
-                pattern_candle = pattern_hit["pattern_candle"]
-                pattern_idx = int(pattern_hit["pattern_candle_number"]) - 1
-
-        else:
-            pattern_hit = None
-            pattern_match = _idea_pattern_match_builder(
-                pattern_action,
-                pattern_vwap_level,
-                first,
-                pattern_candle,
-            )
-
-        if pattern_action == "none" and (
-            entry_rule.startswith("later_30m") or entry_rule.startswith("later_5m")
-        ):
-            entry_anchor_time = _idea_search_start_time(
                 pattern_candle_rule,
-                day_30m_exit,
             )
-        else:
-            entry_anchor_time = pattern_candle["datetime"] + pd.Timedelta(minutes=30)
+            advanced_filter_result = "Passed" if pattern_ok else "Failed"
 
-        if entry_anchor_time is None:
+            if not pattern_ok:
+                pattern_rows.append({
+                    "date": d,
+                    "nifty_signal": first.get("Signal"),
+                    "nifty_candle": first.get("Candles"),
+                    "direction": direction,
+                    "pattern_candle_rule": pattern_candle_rule,
+                    "pattern_action": pattern_action,
+                    "pattern_vwap_level": pattern_vwap_level,
+                    "pattern_match": False,
+                    "Advanced_Filter_Candle": advanced_filter_candle,
+                    "Advanced_Filter_Result": advanced_filter_result,
+                    "First_30m_RSI": first_30m_rsi,
+                    "VWAP_Width_%": vwap_width_pct_2nd,
+                })
+                continue
+
+        day_5m_vwap = _add_30m_vwap_to_5m(day_5m, day_vwap)
+        after_time = _idea_search_start_time(pattern_candle_rule, day_30)
+
+        # Entry trigger moves entry; advanced filter only filters the day.
+        entry_price = None
+        entry_time = None
+        entry_bar_time = None
+        entry_candle_number = None
+        trigger_candle_number = None
+        trigger_candle_start_time = None
+        trigger_candle_end_time = None
+        entry_reason = None
+
+        first_30 = day_30.iloc[0]
+
+        # Direct first 30m entry
+        if entry_rule == "pattern_close" and pattern_candle_rule == "candle_1":
+            entry_price = float(first_30["close"])
+            entry_bar_time = first_30["datetime"]
+            entry_time = entry_bar_time + pd.Timedelta(minutes=30)
+            entry_candle_number = 1
+            entry_reason = "Entry at 1st 30m close"
+
+        # Later trigger entry (5m or 30m scan)
+        elif entry_rule.startswith("later_5m") or entry_rule.startswith("later_30m"):
+            entry_time, entry_bar_time, entry_price, entry_reason = _idea_find_entry(
+                entry_rule,
+                day_30,
+                day_5m_vwap,
+                after_time,
+                first,
+                second,
+                pattern_candle,
+                vwap_level,
+                entry_vwap_source,
+            )
+
+            if entry_price is not None:
+                if entry_rule.startswith("later_5m"):
+                    day_5 = day_5m_vwap.sort_values("datetime").reset_index(drop=True)
+                    hit_idx = day_5.index[day_5["datetime"].eq(entry_bar_time)]
+                    if len(hit_idx):
+                        candle_num = int(hit_idx[0]) + 1
+                        entry_candle_number = candle_num
+                        trigger_candle_number = candle_num
+                        trigger_candle_start_time = entry_bar_time
+                        trigger_candle_end_time = entry_time
+                else:
+                    candle_num = _idea_candle_number_from_time(day_30, entry_bar_time)
+                    entry_candle_number = candle_num
+                    trigger_candle_number = candle_num
+                    trigger_candle_start_time = entry_bar_time
+                    trigger_candle_end_time = entry_time
+
+        # Pattern candle close entry (e.g. exact 2nd/3rd/4th 30m candle)
+        elif entry_rule == "pattern_close":
+            entry_time, entry_bar_time, entry_price, entry_reason = _idea_find_entry(
+                entry_rule,
+                day_30,
+                day_5m_vwap,
+                after_time,
+                first,
+                second,
+                pattern_candle,
+                vwap_level,
+                entry_vwap_source,
+            )
+
+            if entry_price is not None:
+                candle_num = _idea_candle_number_from_time(day_30, entry_bar_time)
+                entry_candle_number = candle_num
+                trigger_candle_number = candle_num
+                trigger_candle_start_time = entry_bar_time
+                trigger_candle_end_time = entry_time
+
+        # If no trigger entry found, skip day
+        if entry_price is None:
             continue
+
+        entry_source = (
+            "1st 30m close"
+            if entry_candle_number == 1 and trigger_candle_number is None
+            else entry_reason
+        )
 
         pattern_row = {
             "date": d,
@@ -2629,25 +3038,35 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
             "pattern_candle_rule": pattern_candle_rule,
             "pattern_action": pattern_action,
             "pattern_vwap_level": pattern_vwap_level,
+            "entry_vwap_level": vwap_level,
             "pattern_candle_number": pattern_idx + 1,
-            "pattern_match": pattern_match,
+            "pattern_match": pattern_ok,
 
             "entry_rule": entry_rule,
             "entry_vwap_source": entry_vwap_source,
-            "entry_anchor": f"After candle {pattern_idx + 1} close",
-            "entry_anchor_time": entry_anchor_time,
+            "entry_anchor": entry_source,
+            "entry_anchor_time": entry_time,
 
             "exit_rule": exit_rule,
 
             "first_high": float(first["high"]),
             "first_low": float(first["low"]),
             "first_close": float(first["close"]),
-            "first_rsi": float(first["RSI"]) if "RSI" in first and not pd.isna(first.get("RSI")) else None,
-            "first_rsi_ma": float(first["RSI-based MA"]) if "RSI-based MA" in first and not pd.isna(first.get("RSI-based MA")) else None,
-            "rsi_filter_reason": rsi_filter_reason,
+            "First_30m_RSI": first_30m_rsi,
+            "VWAP_Width_%": vwap_width_pct_2nd,
+
+            "Entry_Source": entry_source,
+            "Entry_Time": entry_time,
+            "Entry_Price": entry_price,
+            "entry_candle_number": entry_candle_number,
+            "trigger_candle_number": trigger_candle_number,
+            "trigger_candle_start_time": trigger_candle_start_time,
+            "trigger_candle_end_time": trigger_candle_end_time,
+            "Advanced_Filter_Candle": advanced_filter_candle,
+            "Advanced_Filter_Result": advanced_filter_result,
 
             "pattern_candle_start_time": pattern_candle["datetime"],
-            "pattern_candle_close_time": entry_anchor_time,
+            "pattern_candle_close_time": pattern_candle["datetime"] + pd.Timedelta(minutes=30),
             "pattern_open": float(pattern_candle["open"]),
             "pattern_high": float(pattern_candle["high"]),
             "pattern_low": float(pattern_candle["low"]),
@@ -2657,54 +3076,14 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
             "pattern_lower_band_1": float(pattern_candle["Lower Band #1"]),
         }
 
-        if pattern_hit is not None:
-            pattern_row.update({
-                "pattern_action_hit_time": pattern_hit["entry_time"],
-                "pattern_action_hit_bar_time": pattern_hit["entry_bar_time"],
-                "pattern_action_level": pattern_hit["pattern_level"],
-                "pattern_action_level_price": pattern_hit["pattern_level_price"],
-                "pattern_action_rsi": pattern_hit["rsi"],
-                "pattern_action_rsi_ma": pattern_hit["rsi_ma"],
-            })
-
         pattern_rows.append(pattern_row)
 
-        if not pattern_match:
-            continue
-
-        day_5m_vwap = _add_30m_vwap_to_5m(day_5m, day_vwap)
-
-        entry_time, entry_bar_time, entry, entry_reason = _idea_find_entry(
-            entry_rule,
-            day_30m_exit,
-            day_5m_vwap,
-            entry_anchor_time,
-            first,
-            second,
-            pattern_candle,
-            pattern_vwap_level,
-            entry_vwap_source,
-        )
-
-        entry_candle_number = None
-
-        if entry_rule.startswith("later_30m"):
-            entry_candle_number = _idea_candle_number_from_time(
-                day_30m_exit,
-                entry_bar_time,
-            )
-        else:
-            entry_candle_number = pattern_idx + 1
-
-        if entry is None or entry_time is None or entry_bar_time is None:
-            missed.append({**pattern_row, "miss_reason": entry_reason})
-            continue
-
-        exit_df = day_5m_vwap if exit_timeframe == "5m" else day_30m_exit
+        # Exit scan starts after entry
+        exit_df = day_5m_vwap if exit_timeframe == "5m" else day_30
         result = _idea_run_exit(
             exit_df,
             entry_time,
-            float(entry),
+            entry_price,
             direction,
             first,
             second,
@@ -2716,21 +3095,49 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
         trades.append({
             **pattern_row,
 
-            # table/debug timing
-            "entry_time": entry_time,                 # actual entry close time
-            "entry_bar_time": entry_bar_time,         # candle timestamp in data
-            "entry_exec_time": entry_time,            # alias for exit scan start
-            "exit_start_time": entry_time,            # exit scanning starts here
+            "entry_time": entry_time,
+            "entry_bar_time": entry_bar_time,
+            "entry_exec_time": entry_time,
+            "exit_start_time": entry_time,
 
-            "entry": round(float(entry), 2),
+            "entry": round(entry_price, 2),
             "entry_candle_number": entry_candle_number,
+            "trigger_candle_number": trigger_candle_number,
+            "trigger_candle_start_time": trigger_candle_start_time,
+            "trigger_candle_end_time": trigger_candle_end_time,
             "entry_reason": entry_reason,
             "exit_timeframe": exit_timeframe,
             **result,
         })
 
+        pnl = result.get("pnl")
+        normal_row = {
+            "Date": d,
+            "Signal": first.get("Signal"),
+            "Direction": direction,
+            "Candles": first.get("Candles"),
+            "Entry_Time": entry_time,
+            "Entry_Price": entry_price,
+            "entry_candle_number": entry_candle_number,
+            "trigger_candle_number": trigger_candle_number,
+            "trigger_candle_start_time": trigger_candle_start_time,
+            "trigger_candle_end_time": trigger_candle_end_time,
+            "Exit_Time": result.get("exit_time"),
+            "Exit_Price": result.get("exit"),
+            "Exit_Reason": result.get("exit_reason"),
+            "PNL": pnl,
+            "Result": "Win" if pnl is not None and pnl > 0 else "Loss",
+        }
+
+        raw_row = normal_row.copy()
+        raw_row.update(_build_raw_30m_features(day_30, max_candles=6))
+        detailed_raw_rows.append(raw_row)
+
     return {
+        "part1_count": part1_count,
+        "part2_count": part2_count,
         "trades": pd.DataFrame(trades),
+        "detailed_raw": pd.DataFrame(detailed_raw_rows),
         "missed": pd.DataFrame(missed),
         "pattern_check": pd.DataFrame(pattern_rows),
     }

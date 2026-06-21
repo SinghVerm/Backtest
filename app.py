@@ -1335,12 +1335,15 @@ else:
         }
 
         ADV_PATTERN_ACTION_MAP = {
-            "Touch first high AND close below VWAP level": "touch_first_high_and_close_below_vwap",
-            "Touch first low AND close above VWAP level": "touch_first_low_and_close_above_vwap",
+            "None - no pattern condition": "none",
+            "Touch first high AND close below VWAP level": "touch_first_high_close_below_vwap",
+            "Touch first low AND close above VWAP level": "touch_first_low_close_above_vwap",
+            "Close above VWAP level": "close_above_vwap",
+            "Close below VWAP level": "close_below_vwap",
+            "Touch VWAP level and close above": "touch_vwap_close_above",
+            "Touch VWAP level and close below": "touch_vwap_close_below",
             "Touch first high and close below": "touch_first_high_close_below",
             "Touch first low and close above": "touch_first_low_close_above",
-            "Close below VWAP level": "close_below_vwap",
-            "Close above VWAP level": "close_above_vwap",
         }
 
         e1, e2, e3 = st.columns(3)
@@ -1362,14 +1365,9 @@ else:
             )
 
         with e3:
-            VWAP_LEVEL_UI = {
-                "None": None,
-                **IDEA_VWAP_LEVEL_RULES,
-            }
-
             idea_vwap_level_label = st.selectbox(
                 "VWAP Level",
-                list(VWAP_LEVEL_UI.keys()),
+                list(IDEA_VWAP_LEVEL_RULES.keys()),
                 index=1,
                 key="idea_vwap_level",
             )
@@ -1424,7 +1422,7 @@ else:
             key="idea_use_two_step_pattern",
         )
 
-        adv1, adv2 = st.columns(2)
+        adv1, adv2, adv3 = st.columns(3)
 
         with adv1:
             idea_adv_pattern_candle_label = st.selectbox(
@@ -1439,15 +1437,25 @@ else:
             idea_adv_pattern_action_label = st.selectbox(
                 "Pattern Condition",
                 [
+                    "None - no pattern condition",
                     "Touch first high AND close below VWAP level",
                     "Touch first low AND close above VWAP level",
-                    "Touch first high and close below",
-                    "Touch first low and close above",
-                    "Close below VWAP level",
                     "Close above VWAP level",
+                    "Close below VWAP level",
+                    "Touch VWAP level and close above",
+                    "Touch VWAP level and close below",
                 ],
-                index=0,
+                index=1,
                 key="idea_adv_pattern_action",
+                disabled=not idea_use_two_step_pattern,
+            )
+
+        with adv3:
+            idea_adv_pattern_vwap_level_label = st.selectbox(
+                "Pattern VWAP Level",
+                ["Middle VWAP", "Upper Band #1", "Lower Band #1"],
+                index=1,
+                key="idea_pattern_vwap_level",
                 disabled=not idea_use_two_step_pattern,
             )
 
@@ -1456,61 +1464,12 @@ else:
             "If it passes, entry search starts after that candle closes."
         )
 
-        rsi_tab = st.tabs(["RSI"])[0]
-
-        with rsi_tab:
-            idea_rsi_enabled = st.checkbox(
-                "Enable first 30m candle RSI filter",
-                value=False,
-                key="idea_rsi_enabled",
-            )
-
-            r1, r2, r3 = st.columns(3)
-
-            with r1:
-                idea_rsi_operator = st.selectbox(
-                    "First 30m RSI Condition",
-                    [
-                        "RSI >",
-                        "RSI >=",
-                        "RSI <",
-                        "RSI <=",
-                        "RSI between",
-                        "RSI outside",
-                        "RSI > RSI-based MA",
-                        "RSI < RSI-based MA",
-                    ],
-                    index=0,
-                    key="idea_rsi_operator",
-                    disabled=not idea_rsi_enabled,
-                )
-
-            with r2:
-                idea_rsi_value = st.number_input(
-                    "RSI Value",
-                    value=70.0,
-                    step=1.0,
-                    format="%.2f",
-                    key="idea_rsi_value",
-                    disabled=not idea_rsi_enabled
-                    or idea_rsi_operator in ["RSI > RSI-based MA", "RSI < RSI-based MA"],
-                )
-
-            with r3:
-                idea_rsi_value2 = st.number_input(
-                    "RSI Value 2",
-                    value=30.0,
-                    step=1.0,
-                    format="%.2f",
-                    key="idea_rsi_value2",
-                    disabled=not idea_rsi_enabled
-                    or idea_rsi_operator not in ["RSI between", "RSI outside"],
-                )
-
-            st.caption(
-                "Uses RSI from Vwap.xlsx only. It checks the first 30m candle of the day. "
-                "No RSI is required from NSE_NIFTY, 5.xlsx."
-            )
+        # RSI is no longer used as a filter.
+        # It is only shown in the result table.
+        use_first_rsi_filter = False
+        first_rsi_condition = None
+        first_rsi_value = None
+        first_rsi_value2 = None
 
         p1, p2, p3 = st.columns(3)
 
@@ -1550,7 +1509,8 @@ else:
     if run_idea:
         trigger = ENTRY_TRIGGER_MAP[idea_entry_trigger_label]
         search_mode_rule = SEARCH_MODE_RULES[idea_search_mode_label]
-        selected_vwap_level = VWAP_LEVEL_UI[idea_vwap_level_label]
+        selected_vwap_level = IDEA_VWAP_LEVEL_RULES[idea_vwap_level_label]
+        filter_candles = all_candles if idea_select_all_candles else idea_candles
 
         if trigger["needs_vwap"] and selected_vwap_level is None:
             st.warning("Select a VWAP Level, or use Entry Trigger = None - direct entry.")
@@ -1562,32 +1522,34 @@ else:
             pattern_candle_rule = "candle_1"
             pattern_action = "none"
             entry_rule = "pattern_close"
-            pattern_vwap_level = None
+            vwap_level = None
 
         # First matching later 30m candle.
         elif search_mode_rule == "first_match_30m":
             pattern_candle_rule = START_AFTER_RULES[idea_start_after_label]
             pattern_action = "none"
             entry_rule = trigger["entry_30m"]
-            pattern_vwap_level = selected_vwap_level
+            vwap_level = selected_vwap_level
 
         # First matching later 5m candle.
         elif search_mode_rule == "first_match_5m":
             pattern_candle_rule = START_AFTER_RULES[idea_start_after_label]
             pattern_action = "none"
             entry_rule = trigger["entry_5m"]
-            pattern_vwap_level = selected_vwap_level
+            vwap_level = selected_vwap_level
 
         # Exact 2nd/3rd/4th 30m candle.
         else:
             pattern_candle_rule = search_mode_rule
             pattern_action = trigger["pattern_action"]
             entry_rule = "pattern_close"
-            pattern_vwap_level = selected_vwap_level
+            vwap_level = selected_vwap_level
 
+        pattern_vwap_level = None
         if idea_use_two_step_pattern:
             pattern_candle_rule = ADV_PATTERN_CANDLE_MAP[idea_adv_pattern_candle_label]
             pattern_action = ADV_PATTERN_ACTION_MAP[idea_adv_pattern_action_label]
+            pattern_vwap_level = idea_adv_pattern_vwap_level_label
 
             trigger = ENTRY_TRIGGER_MAP[idea_entry_trigger_label]
 
@@ -1600,25 +1562,20 @@ else:
 
         idea_config = {
             "signal": idea_signal,
-            "candles": idea_candles,
+            "candles": filter_candles,
             "direction": idea_direction_label.lower(),
 
             "pattern_candle_rule": pattern_candle_rule,
             "pattern_action": pattern_action,
+            "vwap_level": vwap_level,
             "pattern_vwap_level": pattern_vwap_level,
+            "use_pattern_filter": idea_use_two_step_pattern,
 
             "entry_rule": entry_rule,
             "entry_vwap_source": "5m"
             if idea_entry_vwap_source_label == "5m VWAP"
             else "30m",
             "exit_rule": IDEA_EXIT_RULES[idea_exit_label],
-
-            "rsi_filter": {
-                "enabled": idea_rsi_enabled,
-                "operator": idea_rsi_operator,
-                "value": idea_rsi_value,
-                "value2": idea_rsi_value2,
-            },
 
             "params": {
                 "partial": idea_partial,
@@ -1642,9 +1599,14 @@ else:
     if "idea_result" in st.session_state:
         idea_result = st.session_state.idea_result
 
-        idea_trades = idea_result["trades"]
-        idea_missed = idea_result["missed"]
-        idea_pattern_check = idea_result["pattern_check"]
+        if isinstance(idea_result, dict):
+            m_part1, m_part2 = st.columns(2)
+            m_part1.metric("Part 1 matched days", idea_result.get("part1_count", 0))
+            m_part2.metric("After advanced filter", idea_result.get("part2_count", 0))
+
+        idea_trades = idea_result.get("trades", pd.DataFrame())
+        idea_missed = idea_result.get("missed", pd.DataFrame())
+        idea_pattern_check = idea_result.get("pattern_check", pd.DataFrame())
 
         st.subheader("Idea Summary")
         st.caption(st.session_state.get("idea_signal_caption", ""))
@@ -1652,19 +1614,20 @@ else:
         if idea_trades.empty:
             st.warning("No trades found for this idea.")
         else:
-            idea_wins = idea_trades[idea_trades["pnl"] > 0]["pnl"]
-            idea_losses = idea_trades[idea_trades["pnl"] <= 0]["pnl"]
-            idea_avg_win = idea_wins.mean() if len(idea_wins) else 0
-            idea_avg_loss = idea_losses.mean() if len(idea_losses) else 0
-            idea_rr = abs(idea_avg_win / idea_avg_loss) if idea_avg_loss != 0 else 0
+            if "pnl" in idea_trades.columns:
+                idea_wins = idea_trades[idea_trades["pnl"] > 0]["pnl"]
+                idea_losses = idea_trades[idea_trades["pnl"] <= 0]["pnl"]
+                idea_avg_win = idea_wins.mean() if len(idea_wins) else 0
+                idea_avg_loss = idea_losses.mean() if len(idea_losses) else 0
+                idea_rr = abs(idea_avg_win / idea_avg_loss) if idea_avg_loss != 0 else 0
 
-            m1, m2, m3, m4, m5, m6 = st.columns(6)
-            m1.metric("Trades", len(idea_trades))
-            m2.metric("PnL", round(idea_trades["pnl"].sum(), 2))
-            m3.metric("Win %", round(len(idea_wins) / len(idea_trades) * 100, 2))
-            m4.metric("RR", round(idea_rr, 2))
-            m5.metric("Avg Win", round(idea_avg_win, 2))
-            m6.metric("Avg Loss", round(idea_avg_loss, 2))
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+                m1.metric("Trades", len(idea_trades))
+                m2.metric("PnL", round(idea_trades["pnl"].sum(), 2))
+                m3.metric("Win %", round(len(idea_wins) / len(idea_trades) * 100, 2))
+                m4.metric("RR", round(idea_rr, 2))
+                m5.metric("Avg Win", round(idea_avg_win, 2))
+                m6.metric("Avg Loss", round(idea_avg_loss, 2))
 
             display_cols = [
                 "date",
@@ -1675,12 +1638,21 @@ else:
                 "entry_reason",
                 "exit_reason",
 
-                "first_rsi",
-                "first_rsi_ma",
-                "rsi_filter_reason",
+                "Entry_Source",
+                "Entry_Time",
+                "Entry_Price",
+                "Advanced_Filter_Candle",
+                "Advanced_Filter_Result",
+                "First_30m_RSI",
+                "VWAP_Width_%",
 
-                "pattern_candle_number",
+                "trigger_candle_number",
+                "trigger_candle_start_time",
+                "trigger_candle_end_time",
                 "entry_candle_number",
+                "pattern_candle_number",
+                "pattern_candle",
+                "pattern_condition",
                 "pattern_candle_start_time",
                 "pattern_candle_close_time",
                 "pattern_vwap_level",
@@ -1698,9 +1670,6 @@ else:
             idea_trade_view = idea_trades[display_cols].copy()
 
             idea_trade_view = idea_trade_view.rename(columns={
-                "pattern_candle_number": "trigger_candle_number",
-                "pattern_candle_start_time": "trigger_candle_start_time",
-                "pattern_candle_close_time": "trigger_candle_close_time",
                 "pattern_vwap_level": "vwap_level",
             })
 
@@ -1779,3 +1748,17 @@ else:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+        if isinstance(st.session_state.get("idea_result"), dict):
+            raw_df = st.session_state.idea_result.get("detailed_raw")
+
+            if isinstance(raw_df, pd.DataFrame) and not raw_df.empty:
+                csv = raw_df.to_csv(index=False).encode("utf-8")
+
+                st.download_button(
+                    label="Download detailed raw result CSV",
+                    data=csv,
+                    file_name="vwap_idea_detailed_raw_result.csv",
+                    mime="text/csv",
+                    key="download_vwap_idea_detailed_raw",
+                )
