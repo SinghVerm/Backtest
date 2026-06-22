@@ -1986,6 +1986,24 @@ def _idea_pattern_match_builder(pattern_action, vwap_level_rule, first, pattern_
     if pattern_action == "none":
         return True
 
+    if pattern_action == "close_above_first_high":
+        first_high = pd.to_numeric(first.get("high"), errors="coerce")
+        c_close = pd.to_numeric(pattern_candle.get("close"), errors="coerce")
+
+        if pd.isna(first_high) or pd.isna(c_close):
+            return False
+
+        return c_close > first_high
+
+    if pattern_action == "close_below_first_low":
+        first_low = pd.to_numeric(first.get("low"), errors="coerce")
+        c_close = pd.to_numeric(pattern_candle.get("close"), errors="coerce")
+
+        if pd.isna(first_low) or pd.isna(c_close):
+            return False
+
+        return c_close < first_low
+
     pc_open = float(pattern_candle["open"])
     pc_high = float(pattern_candle["high"])
     pc_low = float(pattern_candle["low"])
@@ -2035,14 +2053,8 @@ def _idea_pattern_match_builder(pattern_action, vwap_level_rule, first, pattern_
     if pattern_action == "touch_first_high_close_below":
         return pc_high >= first_high and pc_close < first_high
 
-    if pattern_action == "close_above_first_high":
-        return pc_close > first_high
-
     if pattern_action == "touch_first_low_close_above":
         return pc_low <= first_low and pc_close > first_low
-
-    if pattern_action == "close_below_first_low":
-        return pc_close < first_low
 
     if pattern_action == "open_above_upper_close_below_lower":
         return pc_open > upper and pc_close < lower
@@ -2063,6 +2075,7 @@ def _idea_find_entry(
     pattern_candle,
     pattern_vwap_level,
     entry_vwap_source="30m",
+    direction="long",
 ):
     # entry_bar_time = candle timestamp in data (START for 5m, 30m open for 30m entries).
     # entry_time = actual entry at candle close (+5m or +30m).
@@ -2091,6 +2104,19 @@ def _idea_find_entry(
 
             entry_bar_time = r["datetime"]
             entry_time = entry_bar_time + pd.Timedelta(minutes=30)
+
+            first_high = float(first["high"])
+
+            if (
+                entry_rule == "later_30m_close_above_first_high"
+                and close > first_high
+            ):
+                return (
+                    entry_time,
+                    entry_bar_time,
+                    close,
+                    "30m closed above 1st 30m high; entry at 30m close",
+                )
 
             hit = False
 
@@ -2151,6 +2177,361 @@ def _idea_find_entry(
 
         return None, None, None, "No entry"
 
+    # =========================
+    # 5m ANY VWAP TOUCH + NEXT 2 BREAK SETUP HIGH/LOW
+    # Starts AFTER first 30m close and skips the 09:45 5m candle
+    # =========================
+    if entry_rule == "later_5m_touch_any_vwap_next2_break":
+        day_5_scan = day_5m_vwap.copy()
+
+        if "datetime" not in day_5_scan.columns:
+            day_5_scan["datetime"] = pd.to_datetime(day_5_scan["time"], errors="coerce")
+
+        day_5_scan = day_5_scan.sort_values("datetime").reset_index(drop=True)
+
+        first_time = first.get("datetime", first.get("time"))
+        first_time = pd.to_datetime(first_time, errors="coerce")
+
+        # First 30m candle closes at 09:45.
+        first_30m_close_time = first_time + pd.Timedelta(minutes=30)
+
+        # IMPORTANT:
+        # use >, not >=
+        # This skips the 09:45 5m candle and starts from 09:50 candle.
+        day_5_scan = day_5_scan[
+            day_5_scan["datetime"] > first_30m_close_time
+        ].reset_index(drop=True)
+
+        def _num(x):
+            return pd.to_numeric(x, errors="coerce")
+
+        def _touches_any_vwap_and_closes_correct_side(row, direction):
+            high = _num(row.get("high"))
+            low = _num(row.get("low"))
+            close = _num(row.get("close"))
+
+            if pd.isna(high) or pd.isna(low) or pd.isna(close):
+                return False
+
+            levels = [
+                _num(row.get("VWAP")),
+                _num(row.get("Upper Band #1")),
+                _num(row.get("Lower Band #1")),
+            ]
+
+            for lvl in levels:
+                if pd.isna(lvl):
+                    continue
+
+                touched = low <= lvl <= high
+
+                if not touched:
+                    continue
+
+                if direction == "short" and close < lvl:
+                    return True
+
+                if direction == "long" and close > lvl:
+                    return True
+
+            return False
+
+        for i in range(len(day_5_scan)):
+            setup = day_5_scan.iloc[i]
+
+            setup_ok = _touches_any_vwap_and_closes_correct_side(
+                setup,
+                direction
+            )
+
+            if not setup_ok:
+                continue
+
+            setup_high = _num(setup.get("high"))
+            setup_low = _num(setup.get("low"))
+
+            if pd.isna(setup_high) or pd.isna(setup_low):
+                continue
+
+            # Only check next 2 candles after setup candle
+            next_two = day_5_scan.iloc[i + 1:i + 3]
+
+            if next_two.empty:
+                continue
+
+            for _, confirm in next_two.iterrows():
+                confirm_high = _num(confirm.get("high"))
+                confirm_low = _num(confirm.get("low"))
+                confirm_close = _num(confirm.get("close"))
+
+                if pd.isna(confirm_close):
+                    continue
+
+                confirm_bar_time = pd.to_datetime(
+                    confirm.get("datetime", confirm.get("time")),
+                    errors="coerce"
+                )
+
+                confirm_entry_time = confirm_bar_time + pd.Timedelta(minutes=5)
+
+                if (
+                    direction == "short"
+                    and pd.notna(confirm_low)
+                    and confirm_low < setup_low
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        "5m touched any VWAP, closed below it, next 2 broke setup low; short entry at confirm close",
+                    )
+
+                if (
+                    direction == "long"
+                    and pd.notna(confirm_high)
+                    and confirm_high > setup_high
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        "5m touched any VWAP, closed above it, next 2 broke setup high; long entry at confirm close",
+                    )
+
+        return None, None, None, "No 5m VWAP touch + next 2 break entry found"
+
+    # =========================
+    # 5m SELECTED VWAP TOUCH + NEXT 2 BREAK SETUP HIGH/LOW
+    # Starts AFTER first 30m close, skips 09:45 candle
+    # =========================
+    if entry_rule == "later_5m_touch_selected_vwap_next2_break":
+        day_5_scan = day_5m_vwap.copy()
+
+        if "datetime" not in day_5_scan.columns:
+            day_5_scan["datetime"] = pd.to_datetime(day_5_scan["time"], errors="coerce")
+
+        day_5_scan = day_5_scan.sort_values("datetime").reset_index(drop=True)
+
+        first_time = first.get("datetime", first.get("time"))
+        first_time = pd.to_datetime(first_time, errors="coerce")
+
+        first_30m_close_time = first_time + pd.Timedelta(minutes=30)
+
+        # IMPORTANT: use >, not >=
+        # This skips the 09:45 candle and starts from 09:50
+        day_5_scan = day_5_scan[
+            day_5_scan["datetime"] > first_30m_close_time
+        ].reset_index(drop=True)
+
+        def _num(x):
+            return pd.to_numeric(x, errors="coerce")
+
+        level_col_map = {
+            "Middle VWAP": "VWAP",
+            "VWAP": "VWAP",
+            "Upper Band #1": "Upper Band #1",
+            "Lower Band #1": "Lower Band #1",
+            "upper": "Upper Band #1",
+            "lower": "Lower Band #1",
+            "middle": "VWAP",
+        }
+
+        selected_level_col = level_col_map.get(pattern_vwap_level, pattern_vwap_level)
+
+        if selected_level_col not in day_5_scan.columns:
+            return None, None, None, f"Selected VWAP level not found: {selected_level_col}"
+
+        for i in range(len(day_5_scan)):
+            setup = day_5_scan.iloc[i]
+
+            setup_high = _num(setup.get("high"))
+            setup_low = _num(setup.get("low"))
+            setup_close = _num(setup.get("close"))
+            setup_level = _num(setup.get(selected_level_col))
+
+            if (
+                pd.isna(setup_high)
+                or pd.isna(setup_low)
+                or pd.isna(setup_close)
+                or pd.isna(setup_level)
+            ):
+                continue
+
+            touched_selected = setup_low <= setup_level <= setup_high
+
+            if not touched_selected:
+                continue
+
+            if direction == "short":
+                setup_ok = setup_close < setup_level
+            else:
+                setup_ok = setup_close > setup_level
+
+            if not setup_ok:
+                continue
+
+            # Only check next 2 candles after setup candle
+            next_two = day_5_scan.iloc[i + 1:i + 3]
+
+            if next_two.empty:
+                continue
+
+            for _, confirm in next_two.iterrows():
+                confirm_high = _num(confirm.get("high"))
+                confirm_low = _num(confirm.get("low"))
+                confirm_close = _num(confirm.get("close"))
+
+                if pd.isna(confirm_close):
+                    continue
+
+                confirm_bar_time = pd.to_datetime(
+                    confirm.get("datetime", confirm.get("time")),
+                    errors="coerce"
+                )
+
+                confirm_entry_time = confirm_bar_time + pd.Timedelta(minutes=5)
+
+                if (
+                    direction == "short"
+                    and pd.notna(confirm_low)
+                    and confirm_low < setup_low
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        f"5m touched {selected_level_col}, closed below it, next 2 broke setup low; short entry at confirm close",
+                    )
+
+                if (
+                    direction == "long"
+                    and pd.notna(confirm_high)
+                    and confirm_high > setup_high
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        f"5m touched {selected_level_col}, closed above it, next 2 broke setup high; long entry at confirm close",
+                    )
+
+        return None, None, None, "No selected VWAP touch + next 2 break entry found"
+
+    # =========================
+    # 5m DIRECTIONAL VWAP TOUCH + NEXT 2 BREAK
+    # Short uses Middle/Lower VWAP
+    # Long uses Middle/Upper VWAP
+    # Starts after 1st 30m close, skips 09:45 candle
+    # =========================
+    if entry_rule == "later_5m_touch_directional_vwap_next2_break":
+        day_5_scan = day_5m_vwap.copy()
+
+        if "datetime" not in day_5_scan.columns:
+            day_5_scan["datetime"] = pd.to_datetime(day_5_scan["time"], errors="coerce")
+
+        day_5_scan = day_5_scan.sort_values("datetime").reset_index(drop=True)
+
+        first_time = first.get("datetime", first.get("time"))
+        first_time = pd.to_datetime(first_time, errors="coerce")
+
+        first_30m_close_time = first_time + pd.Timedelta(minutes=30)
+
+        # use > so 09:45 candle is skipped
+        day_5_scan = day_5_scan[
+            day_5_scan["datetime"] > first_30m_close_time
+        ].reset_index(drop=True)
+
+        def _num(x):
+            return pd.to_numeric(x, errors="coerce")
+
+        if direction == "short":
+            level_cols = ["VWAP", "Lower Band #1"]
+        else:
+            level_cols = ["VWAP", "Upper Band #1"]
+
+        for i in range(len(day_5_scan)):
+            setup = day_5_scan.iloc[i]
+
+            setup_high = _num(setup.get("high"))
+            setup_low = _num(setup.get("low"))
+            setup_close = _num(setup.get("close"))
+
+            if pd.isna(setup_high) or pd.isna(setup_low) or pd.isna(setup_close):
+                continue
+
+            setup_ok = False
+            touched_level_name = None
+
+            for level_col in level_cols:
+                level = _num(setup.get(level_col))
+
+                if pd.isna(level):
+                    continue
+
+                touched = setup_low <= level <= setup_high
+
+                if not touched:
+                    continue
+
+                if direction == "short" and setup_close < level:
+                    setup_ok = True
+                    touched_level_name = level_col
+                    break
+
+                if direction == "long" and setup_close > level:
+                    setup_ok = True
+                    touched_level_name = level_col
+                    break
+
+            if not setup_ok:
+                continue
+
+            next_two = day_5_scan.iloc[i + 1:i + 3]
+
+            if next_two.empty:
+                continue
+
+            for _, confirm in next_two.iterrows():
+                confirm_high = _num(confirm.get("high"))
+                confirm_low = _num(confirm.get("low"))
+                confirm_close = _num(confirm.get("close"))
+
+                if pd.isna(confirm_close):
+                    continue
+
+                confirm_bar_time = pd.to_datetime(
+                    confirm.get("datetime", confirm.get("time")),
+                    errors="coerce"
+                )
+
+                confirm_entry_time = confirm_bar_time + pd.Timedelta(minutes=5)
+
+                if (
+                    direction == "short"
+                    and pd.notna(confirm_low)
+                    and confirm_low < setup_low
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        f"5m touched {touched_level_name}, closed below it, next 2 broke setup low; short entry at confirm close",
+                    )
+
+                if (
+                    direction == "long"
+                    and pd.notna(confirm_high)
+                    and confirm_high > setup_high
+                ):
+                    return (
+                        confirm_entry_time,
+                        confirm_bar_time,
+                        float(confirm_close),
+                        f"5m touched {touched_level_name}, closed above it, next 2 broke setup high; long entry at confirm close",
+                    )
+
+        return None, None, None, "No directional VWAP touch + next 2 break entry found"
+
     # 5m timestamps are candle START times; entry is at the 5m close (+5 min).
     if entry_rule.startswith("later_5m"):
         rows = day_5m_vwap[day_5m_vwap["datetime"] >= after_time].copy()
@@ -2162,6 +2543,26 @@ def _idea_find_entry(
 
             entry_bar_time = r["datetime"]
             entry_time = entry_bar_time + pd.Timedelta(minutes=5)
+
+            first_low = float(first["low"])
+
+            if entry_rule == "later_5m_touch_any_vwap_close_below_first_low":
+                if entry_vwap_source == "30m":
+                    touched_any = (
+                        _touches(r, r.get("Lower Band #1_30m"))
+                        or _touches(r, r.get("VWAP_30m"))
+                        or _touches(r, r.get("Upper Band #1_30m"))
+                    )
+                else:
+                    touched_any = _touches_any_vwap(r)
+                if touched_any and close < first_low:
+                    return (
+                        entry_time,
+                        entry_bar_time,
+                        close,
+                        "5m touched any VWAP level and closed below 1st 30m low; entry at 5m close",
+                    )
+                continue
 
             # Source choice:
             # 5m = use real VWAP columns from NSE_NIFTY, 5.xlsx
@@ -2928,6 +3329,18 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
         pattern_candle = day_30.iloc[pattern_idx] if len(day_30) > pattern_idx else first
         first_30m_rsi = _idea_first_30m_rsi(day_vwap)
 
+        if not use_pattern_filter and pattern_action not in (None, "", "none"):
+            level_for_pattern = (
+                pattern_vwap_level if pattern_vwap_level is not None else vwap_level
+            )
+            if not _idea_pattern_match_builder(
+                pattern_action,
+                level_for_pattern,
+                first,
+                pattern_candle,
+            ):
+                continue
+
         # Advanced pattern only filters the day (pass/fail); it does not move entry.
         pattern_ok = True
         advanced_filter_candle = None
@@ -2995,6 +3408,7 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
                 pattern_candle,
                 vwap_level,
                 entry_vwap_source,
+                direction,
             )
 
             if entry_price is not None:
@@ -3026,6 +3440,7 @@ def run_idea_lab(nifty_df, vwap_df, five_min_df, config):
                 pattern_candle,
                 vwap_level,
                 entry_vwap_source,
+                direction,
             )
 
             if entry_price is not None:

@@ -325,20 +325,63 @@ def build_5m_day_chart(chart_df, selected_row=None):
         except Exception:
             pass
 
-        # Real entry execution time line
-        if (
-            "entry_time" in selected_row.index
-            and pd.notna(selected_row.get("entry_time"))
-        ):
+        # Entry vertical line.
+        # For 5m entries, use entry_bar_time so it lines up with the candle.
+        entry_line_time = selected_row.get("entry_time")
+
+        try:
+            entry_src = str(selected_row.get("Entry_Source", "")).lower()
+            entry_reason = str(selected_row.get("entry_reason", "")).lower()
+            entry_vwap_source = str(selected_row.get("entry_vwap_source", "")).lower()
+
+            is_5m_entry = (
+                "5m" in entry_src
+                or "5m" in entry_reason
+                or entry_vwap_source == "5m"
+            )
+
+            if (
+                is_5m_entry
+                and "entry_bar_time" in selected_row.index
+                and pd.notna(selected_row.get("entry_bar_time"))
+            ):
+                entry_line_time = selected_row.get("entry_bar_time")
+
+        except Exception:
+            pass
+
+        if pd.notna(entry_line_time):
             fig.add_vline(
-                x=pd.to_datetime(selected_row.get("entry_time")),
+                x=pd.to_datetime(entry_line_time),
                 line_width=1,
                 line_dash="dot",
             )
 
-        # On 5m chart, always mark actual execution time.
-        # Example: first 30m close entry = 09:45, not 09:15.
+        # On 5m chart:
+        # - 5m entries should be marked on the candle that triggered entry.
+        # - 1st 30m close entry should still show at 09:45.
         entry_marker_time_col = "entry_time"
+
+        try:
+            entry_src = str(selected_row.get("Entry_Source", "")).lower()
+            entry_reason = str(selected_row.get("entry_reason", "")).lower()
+            entry_vwap_source = str(selected_row.get("entry_vwap_source", "")).lower()
+
+            is_5m_entry = (
+                "5m" in entry_src
+                or "5m" in entry_reason
+                or entry_vwap_source == "5m"
+            )
+
+            if (
+                is_5m_entry
+                and "entry_bar_time" in selected_row.index
+                and pd.notna(selected_row.get("entry_bar_time"))
+            ):
+                entry_marker_time_col = "entry_bar_time"
+
+        except Exception:
+            pass
 
         entry_label = "Entry"
 
@@ -1368,6 +1411,18 @@ else:
                 "entry_5m": "later_5m_close_above_vwap",
                 "needs_vwap": True,
             },
+            "Close above 1st 30m high": {
+                "pattern_action": "close_above_first_high",
+                "entry_30m": "later_30m_close_above_first_high",
+                "entry_5m": "later_5m_close_above_first_high",
+                "needs_vwap": False,
+            },
+            "Close below 1st 30m low": {
+                "pattern_action": "close_below_first_low",
+                "entry_30m": "later_30m_close_below_first_low",
+                "entry_5m": "later_5m_close_below_first_low",
+                "needs_vwap": False,
+            },
             "Close below selected VWAP level": {
                 "pattern_action": "close_below_vwap",
                 "entry_30m": "later_30m_close_below_vwap",
@@ -1385,6 +1440,30 @@ else:
                 "entry_30m": "later_30m_touch_vwap_close_below",
                 "entry_5m": "later_5m_touch_vwap_close_below",
                 "needs_vwap": True,
+            },
+            "Touch ANY VWAP level and close below 1st 30m low": {
+                "pattern_action": "touch_any_vwap_close_below_first_low",
+                "entry_30m": "later_30m_touch_any_vwap_close_below_first_low",
+                "entry_5m": "later_5m_touch_any_vwap_close_below_first_low",
+                "needs_vwap": False,
+            },
+            "5m touch ANY VWAP then next 2 break setup high/low": {
+                "pattern_action": "touch_any_vwap_next2_break",
+                "entry_30m": "later_5m_touch_any_vwap_next2_break",
+                "entry_5m": "later_5m_touch_any_vwap_next2_break",
+                "needs_vwap": False,
+            },
+            "5m touch SELECTED VWAP then next 2 break setup high/low": {
+                "pattern_action": "touch_selected_vwap_next2_break",
+                "entry_30m": "later_5m_touch_selected_vwap_next2_break",
+                "entry_5m": "later_5m_touch_selected_vwap_next2_break",
+                "needs_vwap": True,
+            },
+            "5m touch directional VWAP then next 2 break setup high/low": {
+                "pattern_action": "touch_directional_vwap_next2_break",
+                "entry_30m": "later_5m_touch_directional_vwap_next2_break",
+                "entry_5m": "later_5m_touch_directional_vwap_next2_break",
+                "needs_vwap": False,
             },
         }
 
