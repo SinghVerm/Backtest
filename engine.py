@@ -1445,6 +1445,8 @@ IDEA_EXIT_RULES = {
     "yHigh Touch": "touch_yhigh",
     "Close Below First Low": "hard_first_low",
     "Close Above First High": "hard_first_high",
+    "First High Touch": "touch_first_high",
+    "First Low Touch": "touch_first_low",
     "Weakness at Yesterday Levels": "weakness",
     "Strength at Yesterday Levels": "strength",
 
@@ -2336,6 +2338,20 @@ def _idea_exit_hit(exit_rule, row, prev, state, direction, first, second, i, ent
         if not _valid_sl_side(entry, state.get("first_high"), direction):
             return False, None, None
         return exit_hard_first_high(row, state, direction)
+
+    if exit_rule == "touch_first_high":
+        first_high = float(first["high"])
+
+        high = pd.to_numeric(row.get("high"), errors="coerce")
+        if pd.notna(high) and high >= first_high:
+            return True, first_high, "First High Touch"
+
+    if exit_rule == "touch_first_low":
+        first_low = float(first["low"])
+
+        low = pd.to_numeric(row.get("low"), errors="coerce")
+        if pd.notna(low) and low <= first_low:
+            return True, first_low, "First Low Touch"
 
     if exit_rule == "weakness":
         if prev is None:

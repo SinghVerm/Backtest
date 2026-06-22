@@ -420,122 +420,150 @@ def show_table_with_day_chart(
     if column_config:
         kwargs["column_config"] = column_config
 
+    wide_mode = st.checkbox(
+        "Wide monitor layout: table left, chart right",
+        value=True,
+        key=f"{key}_wide_layout",
+    )
+
+    if wide_mode:
+        table_col, chart_col = st.columns([0.52, 0.48], gap="medium")
+    else:
+        table_col = st.container()
+        chart_col = st.container()
+
     selected_row = None
 
-    try:
-        event = st.dataframe(
-            view_df,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key=f"{key}_df",
-            **kwargs,
-        )
+    with table_col:
+        try:
+            event = st.dataframe(
+                view_df,
+                use_container_width=True,
+                height=560,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"{key}_df",
+                **kwargs,
+            )
 
-        selected_rows = _selected_rows_from_event(event)
+            selected_rows = _selected_rows_from_event(event)
 
-        if selected_rows:
-            st.session_state[f"{key}_selected_pos"] = int(selected_rows[0])
+            if selected_rows:
+                st.session_state[f"{key}_selected_pos"] = int(selected_rows[0])
 
-        pos = st.session_state.get(f"{key}_selected_pos")
+            pos = st.session_state.get(f"{key}_selected_pos")
 
-        if pos is None:
-            st.caption(f"Click any row in {title} to open 30m VWAP chart.")
-            return
+            if pos is None:
+                st.caption(f"Click any row in {title} to open chart.")
+                return
 
-        if 0 <= pos < len(source_df):
-            selected_row = source_df.iloc[pos]
-        else:
-            st.session_state[f"{key}_selected_pos"] = None
-            return
+            if 0 <= pos < len(source_df):
+                selected_row = source_df.iloc[pos]
+            else:
+                st.session_state[f"{key}_selected_pos"] = None
+                return
 
-    except TypeError:
-        st.dataframe(view_df, use_container_width=True)
+        except TypeError:
+            st.dataframe(
+                view_df,
+                use_container_width=True,
+                height=560,
+            )
 
-        date_options = view_df["date"].astype(str).dropna().unique().tolist()
+            date_options = view_df["date"].astype(str).dropna().unique().tolist()
 
-        if not date_options:
-            return
+            if not date_options:
+                return
 
-        selected_date_text = st.selectbox(
-            f"{title} Chart Date",
-            date_options,
-            key=f"{key}_fallback_date",
-        )
+            selected_date_text = st.selectbox(
+                f"{title} Chart Date",
+                date_options,
+                key=f"{key}_fallback_date",
+            )
 
-        matches = source_df[
-            source_df["date"].astype(str).eq(selected_date_text)
-        ]
+            matches = source_df[
+                source_df["date"].astype(str).eq(selected_date_text)
+            ]
 
-        if matches.empty:
-            return
+            if matches.empty:
+                return
 
-        selected_row = matches.iloc[0]
+            selected_row = matches.iloc[0]
+
+    if selected_row is None:
+        return
 
     chart_date = selected_row["date"]
 
-    # =========================
-    # 30m chart from Vwap.xlsx
-    # =========================
-    chart_df_30m = prepare_vwap_chart_df(vwap_source_df, chart_date)
+    with chart_col:
+        chart_tabs = st.tabs(["30m chart", "5m chart"])
 
-    st.markdown(f"#### 30m Candle + VWAP Chart: {chart_date}")
+        with chart_tabs[0]:
+            chart_df_30m = prepare_vwap_chart_df(vwap_source_df, chart_date)
 
-    if chart_df_30m.empty:
-        st.warning(f"No 30-minute VWAP candles found for {chart_date}.")
-    else:
-        st.plotly_chart(
-            build_vwap_day_chart(chart_df_30m, selected_row),
-            use_container_width=True,
-        )
+            st.markdown(f"#### 30m: {chart_date}")
 
-        raw_cols_30m = [
-            "datetime",
-            "open",
-            "high",
-            "low",
-            "close",
-            "VWAP",
-            "Upper Band #1",
-            "Lower Band #1",
-            "RSI",
-            "RSI-based MA",
-        ]
-        raw_cols_30m = [c for c in raw_cols_30m if c in chart_df_30m.columns]
+            if chart_df_30m.empty:
+                st.warning(f"No 30-minute VWAP candles found for {chart_date}.")
+            else:
+                fig30 = build_vwap_day_chart(chart_df_30m, selected_row)
+                fig30.update_layout(height=560)
 
-        with st.expander("Selected day 30m candle data", expanded=False):
-            st.dataframe(chart_df_30m[raw_cols_30m], use_container_width=True)
+                st.plotly_chart(
+                    fig30,
+                    use_container_width=True,
+                )
 
-    if five_min_source_df is not None:
-        # =========================
-        # 5m chart from NSE_NIFTY, 5.xlsx
-        # =========================
-        chart_df_5m = prepare_vwap_chart_df(five_min_source_df, chart_date)
+                raw_cols_30m = [
+                    "datetime",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "VWAP",
+                    "Upper Band #1",
+                    "Lower Band #1",
+                    "RSI",
+                    "RSI-based MA",
+                ]
+                raw_cols_30m = [c for c in raw_cols_30m if c in chart_df_30m.columns]
 
-        st.markdown(f"#### 5m Candle + 5m VWAP Chart: {chart_date}")
+                with st.expander("Selected day 30m candle data", expanded=False):
+                    st.dataframe(chart_df_30m[raw_cols_30m], use_container_width=True)
 
-        if chart_df_5m.empty:
-            st.warning(f"No 5-minute VWAP candles found for {chart_date}.")
-        else:
-            st.plotly_chart(
-                build_5m_day_chart(chart_df_5m, selected_row),
-                use_container_width=True,
-            )
+        with chart_tabs[1]:
+            if five_min_source_df is None:
+                st.info("No 5m source file passed.")
+            else:
+                chart_df_5m = prepare_vwap_chart_df(five_min_source_df, chart_date)
 
-            raw_cols_5m = [
-                "datetime",
-                "open",
-                "high",
-                "low",
-                "close",
-                "VWAP",
-                "Upper Band #1",
-                "Lower Band #1",
-            ]
-            raw_cols_5m = [c for c in raw_cols_5m if c in chart_df_5m.columns]
+                st.markdown(f"#### 5m: {chart_date}")
 
-            with st.expander("Selected day 5m candle data", expanded=False):
-                st.dataframe(chart_df_5m[raw_cols_5m], use_container_width=True)
+                if chart_df_5m.empty:
+                    st.warning(f"No 5-minute VWAP candles found for {chart_date}.")
+                else:
+                    fig5 = build_5m_day_chart(chart_df_5m, selected_row)
+                    fig5.update_layout(height=560)
+
+                    st.plotly_chart(
+                        fig5,
+                        use_container_width=True,
+                    )
+
+                    raw_cols_5m = [
+                        "datetime",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "VWAP",
+                        "Upper Band #1",
+                        "Lower Band #1",
+                    ]
+                    raw_cols_5m = [c for c in raw_cols_5m if c in chart_df_5m.columns]
+
+                    with st.expander("Selected day 5m candle data", expanded=False):
+                        st.dataframe(chart_df_5m[raw_cols_5m], use_container_width=True)
 
 
 from engine import (
@@ -736,6 +764,38 @@ def validate_5m_vwap_required_columns(df_raw):
             missing.append(col)
 
     return missing
+
+
+def table_candle_display(row):
+    candle = str(
+        row.get("nifty_candle", row.get("Candles", row.get("candle", "")))
+    ).strip()
+
+    if candle.lower() != "doji":
+        return candle
+
+    high = pd.to_numeric(row.get("C1_High"), errors="coerce")
+    low = pd.to_numeric(row.get("C1_Low"), errors="coerce")
+    open_ = pd.to_numeric(row.get("C1_Open"), errors="coerce")
+    close = pd.to_numeric(row.get("C1_Close"), errors="coerce")
+
+    if pd.isna(high) or pd.isna(low) or pd.isna(open_) or pd.isna(close):
+        return "Doji"
+
+    candle_range = high - low
+
+    if candle_range <= 0:
+        return "Doji"
+
+    upper_wick = high - max(open_, close)
+    lower_wick = min(open_, close) - low
+
+    is_doji_hammer = (
+        lower_wick > 0
+        and upper_wick <= lower_wick / 3
+    )
+
+    return "Doji Hammer" if is_doji_hammer else "Doji"
 
 
 def get_vwap_chart_source():
@@ -1629,54 +1689,80 @@ else:
                 m5.metric("Avg Win", round(idea_avg_win, 2))
                 m6.metric("Avg Loss", round(idea_avg_loss, 2))
 
+            idea_trade_source = idea_trades.copy()
+
+            # Build C1 OHLC from Vwap.xlsx for display-only Doji Hammer classification.
+            # This does not change engine data or exported source data.
+            c1_source = normalize_excel_datetime(vwap_df).copy()
+
+            c1_source = c1_source.rename(columns={
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+            })
+
+            c1_source["date"] = c1_source["datetime"].dt.date
+
+            for c in ["open", "high", "low", "close"]:
+                c1_source[c] = pd.to_numeric(c1_source[c], errors="coerce")
+
+            c1_first = (
+                c1_source
+                .sort_values(["date", "datetime"])
+                .groupby("date", as_index=False)
+                .first()[["date", "open", "high", "low", "close"]]
+                .rename(columns={
+                    "open": "C1_Open",
+                    "high": "C1_High",
+                    "low": "C1_Low",
+                    "close": "C1_Close",
+                })
+            )
+
+            idea_trade_source["date"] = pd.to_datetime(idea_trade_source["date"]).dt.date
+
+            idea_trade_source = idea_trade_source.merge(
+                c1_first,
+                on="date",
+                how="left"
+            )
+
+            idea_trade_source["Table_Candle"] = idea_trade_source.apply(
+                table_candle_display,
+                axis=1
+            )
+
             display_cols = [
                 "date",
                 "nifty_signal",
-                "nifty_candle",
+                "Table_Candle",
                 "direction",
                 "pnl",
-                "entry_reason",
                 "exit_reason",
 
-                "Entry_Source",
                 "Entry_Time",
                 "Entry_Price",
-                "Advanced_Filter_Candle",
-                "Advanced_Filter_Result",
                 "First_30m_RSI",
                 "VWAP_Width_%",
 
-                "trigger_candle_number",
-                "trigger_candle_start_time",
-                "trigger_candle_end_time",
-                "entry_candle_number",
-                "pattern_candle_number",
                 "pattern_candle",
                 "pattern_condition",
-                "pattern_candle_start_time",
-                "pattern_candle_close_time",
-                "pattern_vwap_level",
-                "entry_vwap_source",
 
                 "entry_time",
-                "entry_bar_time",
                 "entry",
 
                 "exit_time",
                 "exit",
             ]
 
-            display_cols = [c for c in display_cols if c in idea_trades.columns]
-            idea_trade_view = idea_trades[display_cols].copy()
-
-            idea_trade_view = idea_trade_view.rename(columns={
-                "pattern_vwap_level": "vwap_level",
-            })
+            display_cols = [c for c in display_cols if c in idea_trade_source.columns]
+            idea_trade_view = idea_trade_source[display_cols].copy()
 
             show_table_with_day_chart(
                 "Idea Trades",
                 idea_trade_view,
-                idea_trades,
+                idea_trade_source,
                 vwap_df,
                 five_min_df,
                 key="idea_trades",
